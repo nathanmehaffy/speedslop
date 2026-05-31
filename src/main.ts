@@ -7,6 +7,12 @@ const INITIAL_SEED = 1;
 const MAX_DELTA_SECONDS = 1 / 10;
 const ARROW_LENGTH_WORLD_UNITS = 18;
 const ARROW_LOCAL_LENGTH = 2.2;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 64;
+const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const GRID_CELLS_PER_WORLD = 8;
+const TILE_GRID_WIDTH = 5;
+const TILE_COPY_COUNT = TILE_GRID_WIDTH * TILE_GRID_WIDTH;
 
 type WebGpuState = {
   adapter: GPUAdapter;
@@ -15,13 +21,37 @@ type WebGpuState = {
   agentBuffer: GPUBuffer;
   viewBuffer: GPUBuffer;
   bindGroup: GPUBindGroup;
+  gridBindGroup: GPUBindGroup;
   pipeline: GPURenderPipeline;
+  gridPipeline: GPURenderPipeline;
   format: GPUTextureFormat;
 };
 
 type FpsState = {
   frames: number;
   last: number;
+};
+
+type CameraState = {
+  centerX: number;
+  centerY: number;
+  zoom: number;
+};
+
+type PointerPoint = {
+  clientX: number;
+  clientY: number;
+};
+
+type Vec2 = {
+  x: number;
+  y: number;
+};
+
+type PointerGesture = {
+  centerX: number;
+  centerY: number;
+  distance: number;
 };
 
 function queryRequired<T extends Element>(selector: string): T {
@@ -43,6 +73,7 @@ const deathsEl = queryRequired<HTMLSpanElement>("#deaths");
 const generationEl = queryRequired<HTMLSpanElement>("#generation");
 const pauseButton = queryRequired<HTMLButtonElement>("#pause");
 const resetButton = queryRequired<HTMLButtonElement>("#reset");
+const resetViewButton = queryRequired<HTMLButtonElement>("#reset-view");
 const seedInput = queryRequired<HTMLInputElement>("#seed");
 const speedSelect = queryRequired<HTMLSelectElement>("#speed");
 
@@ -62,6 +93,102 @@ function resizeCanvasToDisplaySize(): boolean {
   }
 
   return false;
+}
+
+function createDefaultCamera(): CameraState {
+  return { centerX: 0.5, centerY: 0.5, zoom: MIN_ZOOM };
+}
+
+function resetCamera(camera: CameraState): void {
+  camera.centerX = 0.5;
+  camera.centerY = 0.5;
+  camera.zoom = MIN_ZOOM;
+}
+
+function wrapUnit(value: number): number {
+  return value - Math.floor(value);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function canvasAspect(): number {
+  return canvas.height > 0 ? canvas.width / canvas.height : 1;
+}
+
+function clientOffsetToWorldDelta(camera: CameraState, clientX: number, clientY: number): Vec2 {
+  const rect = canvas.getBoundingClientRect();
+
+  if (rect.width <= 0 || rect.height <= 0) {
+    return { x: 0, y: 0 };
+  }
+
+  const clipX = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const clipY = 1 - ((clientY - rect.top) / rect.height) * 2;
+  const zoomScale = 2 * camera.zoom;
+  const aspect = canvasAspect();
+
+  if (aspect > 1) {
+    return {
+      x: (clipX * aspect) / zoomScale,
+      y: -clipY / zoomScale,
+    };
+  }
+
+  return {
+    x: clipX / zoomScale,
+    y: -clipY / (aspect * zoomScale),
+  };
+}
+
+function clientToWorld(camera: CameraState, clientX: number, clientY: number): Vec2 {
+  const offset = clientOffsetToWorldDelta(camera, clientX, clientY);
+
+  return {
+    x: wrapUnit(camera.centerX + offset.x),
+    y: wrapUnit(camera.centerY + offset.y),
+  };
+}
+
+function anchorCameraAtClientPoint(
+  camera: CameraState,
+  beforeClientX: number,
+  beforeClientY: number,
+  afterClientX: number,
+  afterClientY: number,
+  nextZoom: number,
+): void {
+  const anchor = clientToWorld(camera, beforeClientX, beforeClientY);
+  camera.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+
+  const offset = clientOffsetToWorldDelta(camera, afterClientX, afterClientY);
+  camera.centerX = wrapUnit(anchor.x - offset.x);
+  camera.centerY = wrapUnit(anchor.y - offset.y);
+}
+
+function readPointerGesture(pointers: Map<number, PointerPoint>): PointerGesture | null {
+  const points = [...pointers.values()].slice(0, 2);
+
+  if (points.length === 0) {
+    return null;
+  }
+
+  if (points.length === 1) {
+    return {
+      centerX: points[0].clientX,
+      centerY: points[0].clientY,
+      distance: 0,
+    };
+  }
+
+  const [a, b] = points;
+
+  return {
+    centerX: (a.clientX + b.clientX) * 0.5,
+    centerY: (a.clientY + b.clientY) * 0.5,
+    distance: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+  };
 }
 
 async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuState> {
@@ -99,7 +226,7 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
 
   const viewBuffer = device.createBuffer({
     label: "view-uniform-buffer",
-    size: 16,
+    size: 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -109,8 +236,12 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
       struct View {
         aspect: f32,
         arrow_scale: f32,
+        camera_x: f32,
+        camera_y: f32,
+        zoom: f32,
         _pad0: f32,
         _pad1: f32,
+        _pad2: f32,
       };
 
       struct VertexOutput {
@@ -121,8 +252,8 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
       @group(0) @binding(0) var<storage, read> agents: array<vec4f>;
       @group(0) @binding(1) var<uniform> view: View;
 
-      fn world_to_clip(position: vec2f) -> vec2f {
-        let centered = position * 2.0 - vec2f(1.0, 1.0);
+      fn delta_to_clip(delta: vec2f) -> vec2f {
+        let centered = delta * (2.0 * view.zoom);
         if (view.aspect > 1.0) {
           return vec2f(centered.x / view.aspect, -centered.y);
         }
@@ -135,7 +266,12 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
         @builtin(vertex_index) vertex_index: u32,
         @builtin(instance_index) instance_index: u32,
       ) -> VertexOutput {
-        let base = instance_index * 2u;
+        let agent_index = instance_index / ${TILE_COPY_COUNT}u;
+        let tile_index = instance_index % ${TILE_COPY_COUNT}u;
+        let tile_x = i32(tile_index % ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
+        let tile_y = i32(tile_index / ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
+        let tile_offset = vec2f(f32(tile_x), f32(tile_y));
+        let base = agent_index * 2u;
         let pose = agents[base];
         let appearance = agents[base + 1u];
 
@@ -150,12 +286,13 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
 
         let direction = normalize(pose.zw);
         let side = vec2f(-direction.y, direction.x);
-        let world_position =
-          pose.xy + (direction * local.x + side * local.y) * view.arrow_scale;
+        let agent_delta = pose.xy + tile_offset - vec2f(view.camera_x, view.camera_y);
+        let world_delta =
+          agent_delta + (direction * local.x + side * local.y) * view.arrow_scale;
         let speed_glow = 0.65 + appearance.a * 0.35;
 
         var output: VertexOutput;
-        output.position = vec4f(world_to_clip(world_position), 0.0, 1.0);
+        output.position = vec4f(delta_to_clip(world_delta), 0.0, 1.0);
         output.color = vec4f(appearance.rgb * speed_glow, 1.0);
         return output;
       }
@@ -163,6 +300,87 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
       @fragment
       fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
         return input.color;
+      }
+    `,
+  });
+
+  const gridShader = device.createShaderModule({
+    label: "world-grid-shader",
+    code: `
+      struct View {
+        aspect: f32,
+        arrow_scale: f32,
+        camera_x: f32,
+        camera_y: f32,
+        zoom: f32,
+        _pad0: f32,
+        _pad1: f32,
+        _pad2: f32,
+      };
+
+      struct VertexOutput {
+        @builtin(position) position: vec4f,
+        @location(0) clip_position: vec2f,
+      };
+
+      @group(0) @binding(0) var<uniform> view: View;
+
+      fn clip_to_world_delta(clip_position: vec2f) -> vec2f {
+        let zoom_scale = 2.0 * view.zoom;
+        if (view.aspect > 1.0) {
+          return vec2f(
+            clip_position.x * view.aspect / zoom_scale,
+            -clip_position.y / zoom_scale,
+          );
+        }
+
+        return vec2f(
+          clip_position.x / zoom_scale,
+          -clip_position.y / (view.aspect * zoom_scale),
+        );
+      }
+
+      fn line_alpha(value: f32, spacing: f32, width_pixels: f32) -> f32 {
+        let scaled = value / spacing;
+        let dist = abs(fract(scaled + 0.5) - 0.5);
+        let pixel = max(fwidth(scaled), 0.000001);
+        return 1.0 - smoothstep(pixel * width_pixels, pixel * (width_pixels + 1.0), dist);
+      }
+
+      @vertex
+      fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+        var position = vec2f(-1.0, -1.0);
+        if (vertex_index == 1u) {
+          position = vec2f(3.0, -1.0);
+        } else if (vertex_index == 2u) {
+          position = vec2f(-1.0, 3.0);
+        }
+
+        var output: VertexOutput;
+        output.position = vec4f(position, 0.0, 1.0);
+        output.clip_position = position;
+        return output;
+      }
+
+      @fragment
+      fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
+        let world =
+          vec2f(view.camera_x, view.camera_y) + clip_to_world_delta(input.clip_position);
+        let minor_spacing = 1.0 / ${GRID_CELLS_PER_WORLD.toFixed(1)};
+        let minor = max(
+          line_alpha(world.x, minor_spacing, 0.42),
+          line_alpha(world.y, minor_spacing, 0.42),
+        );
+        let boundary = max(
+          line_alpha(world.x, 1.0, 1.15),
+          line_alpha(world.y, 1.0, 1.15),
+        );
+        let color =
+          vec3f(0.10, 0.18, 0.20) * minor +
+          vec3f(0.58, 0.78, 0.72) * boundary;
+        let alpha = min(0.55, minor * 0.18 + boundary * 0.48);
+
+        return vec4f(color, alpha);
       }
     `,
   });
@@ -200,6 +418,39 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     },
   });
 
+  const gridPipeline = device.createRenderPipeline({
+    label: "world-grid-pipeline",
+    layout: "auto",
+    vertex: {
+      module: gridShader,
+      entryPoint: "vertex_main",
+    },
+    fragment: {
+      module: gridShader,
+      entryPoint: "fragment_main",
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+  });
+
   const bindGroup = device.createBindGroup({
     label: "agent-instancing-bind-group",
     layout: pipeline.getBindGroupLayout(0),
@@ -209,7 +460,24 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     ],
   });
 
-  return { adapter, device, context, agentBuffer, viewBuffer, bindGroup, pipeline, format };
+  const gridBindGroup = device.createBindGroup({
+    label: "world-grid-bind-group",
+    layout: gridPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: viewBuffer } }],
+  });
+
+  return {
+    adapter,
+    device,
+    context,
+    agentBuffer,
+    viewBuffer,
+    bindGroup,
+    gridBindGroup,
+    pipeline,
+    gridPipeline,
+    format,
+  };
 }
 
 function uploadAgents(gpu: WebGpuState, wasm: InitOutput, simulation: Simulation): void {
@@ -220,11 +488,119 @@ function uploadAgents(gpu: WebGpuState, wasm: InitOutput, simulation: Simulation
   gpu.device.queue.writeBuffer(gpu.agentBuffer, 0, agents);
 }
 
-function updateViewUniform(gpu: WebGpuState): void {
-  const aspect = canvas.height > 0 ? canvas.width / canvas.height : 1;
+function updateViewUniform(gpu: WebGpuState, camera: CameraState): void {
+  const aspect = canvasAspect();
   const arrowScale = ARROW_LENGTH_WORLD_UNITS / ARROW_LOCAL_LENGTH / WORLD_SIZE;
-  const uniform = new Float32Array([aspect, arrowScale, 0, 0]);
+  const uniform = new Float32Array([
+    aspect,
+    arrowScale,
+    camera.centerX,
+    camera.centerY,
+    camera.zoom,
+    0,
+    0,
+    0,
+  ]);
   gpu.device.queue.writeBuffer(gpu.viewBuffer, 0, uniform);
+}
+
+function setUpCameraControls(gpu: WebGpuState, camera: CameraState): void {
+  const pointers = new Map<number, PointerPoint>();
+
+  const applyGesture = (before: PointerGesture | null, after: PointerGesture | null): void => {
+    if (!before || !after) {
+      return;
+    }
+
+    let nextZoom = camera.zoom;
+
+    if (before.distance > 0 && after.distance > 0) {
+      nextZoom = camera.zoom * (after.distance / before.distance);
+    }
+
+    anchorCameraAtClientPoint(
+      camera,
+      before.centerX,
+      before.centerY,
+      after.centerX,
+      after.centerY,
+      nextZoom,
+    );
+    updateViewUniform(gpu, camera);
+  };
+
+  canvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+    canvas.classList.add("is-panning");
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId)) {
+      return;
+    }
+
+    event.preventDefault();
+    const before = readPointerGesture(pointers);
+    pointers.set(event.pointerId, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+    const after = readPointerGesture(pointers);
+    applyGesture(before, after);
+  });
+
+  const forgetPointer = (event: PointerEvent): void => {
+    pointers.delete(event.pointerId);
+
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
+
+    if (pointers.size === 0) {
+      canvas.classList.remove("is-panning");
+    }
+  };
+
+  canvas.addEventListener("pointerup", forgetPointer);
+  canvas.addEventListener("pointercancel", forgetPointer);
+  canvas.addEventListener("lostpointercapture", forgetPointer);
+
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+
+      const delta =
+        event.deltaY *
+        (event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? 16
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? Math.max(1, canvas.clientHeight)
+            : 1);
+      const nextZoom = camera.zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY);
+
+      anchorCameraAtClientPoint(
+        camera,
+        event.clientX,
+        event.clientY,
+        event.clientX,
+        event.clientY,
+        nextZoom,
+      );
+      updateViewUniform(gpu, camera);
+    },
+    { passive: false },
+  );
+
+  resetViewButton.addEventListener("click", () => {
+    resetCamera(camera);
+    updateViewUniform(gpu, camera);
+  });
 }
 
 function renderFrame(gpu: WebGpuState, population: number): void {
@@ -245,9 +621,13 @@ function renderFrame(gpu: WebGpuState, population: number): void {
     ],
   });
 
+  pass.setPipeline(gpu.gridPipeline);
+  pass.setBindGroup(0, gpu.gridBindGroup);
+  pass.draw(3);
+
   pass.setPipeline(gpu.pipeline);
   pass.setBindGroup(0, gpu.bindGroup);
-  pass.draw(3, population);
+  pass.draw(3, population * TILE_COPY_COUNT);
   pass.end();
 
   gpu.device.queue.submit([encoder.finish()]);
@@ -290,6 +670,7 @@ async function run(): Promise<void> {
   const simulation = new Simulation(WORLD_SIZE, POPULATION, INITIAL_SEED);
   const agentByteSize = simulation.agent_f32_len() * Float32Array.BYTES_PER_ELEMENT;
   const gpu = await createWebGpuState(agentByteSize);
+  const camera = createDefaultCamera();
   const fpsState = { frames: 0, last: performance.now() };
   let previous = performance.now();
   let paused = false;
@@ -311,14 +692,15 @@ async function run(): Promise<void> {
   });
 
   setStatus(`${gpu.adapter.info?.description || "WebGPU"} ready`);
+  setUpCameraControls(gpu, camera);
   updatePauseButton();
   uploadAgents(gpu, wasm, simulation);
-  updateViewUniform(gpu);
+  updateViewUniform(gpu, camera);
   updateSimulationHud(simulation);
 
   const loop = (now: number): void => {
     if (resizeCanvasToDisplaySize()) {
-      updateViewUniform(gpu);
+      updateViewUniform(gpu, camera);
     }
 
     const dt = Math.min((now - previous) / 1000, MAX_DELTA_SECONDS);

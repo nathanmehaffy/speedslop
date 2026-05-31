@@ -35,6 +35,12 @@ select {
   width: 100vw;
   height: 100vh;
   background: #07090d;
+  cursor: grab;
+  touch-action: none;
+}
+
+#viewport.is-panning {
+  cursor: grabbing;
 }
 
 #hud {
