@@ -8,8 +8,10 @@ import type {
 
 const REAL_TIME_MAX_DELTA_SECONDS = 0.25;
 const TARGET_MAX_STEPS_PER_CHUNK = 24;
-const MAX_MODE_CHUNK_MS = 8;
 const MAX_MODE_BATCH_STEPS = 8;
+// Snapshots are published on this fixed wall-clock heartbeat so motion is evenly paced at every
+// sim rate. In Max mode the worker steps the simulation continuously between heartbeats; in target
+// modes it sleeps until the next one.
 const SNAPSHOT_INTERVAL_MS = 1000 / 120;
 const STATS_INTERVAL_MS = 500;
 const PAUSED_LOOP_DELAY_MS = 50;
@@ -33,7 +35,7 @@ let simRate: SimRate = 1;
 let epoch = 0;
 let availableBuffers: ArrayBuffer[] = [];
 let snapshotDirty = false;
-let lastSnapshotAt = Number.NEGATIVE_INFINITY;
+let nextSnapshotAt = performance.now();
 let previousTickAt = performance.now();
 let stepRemainderSeconds = 0;
 let lastStatsAt = performance.now();
@@ -121,16 +123,8 @@ function advanceSimulationSteps(stepCount: number): void {
   snapshotDirty = true;
 }
 
-function maybePublishSnapshot(now: number, force = false): void {
-  if (!simulation || !wasm || availableBuffers.length === 0) {
-    return;
-  }
-
-  if (!snapshotDirty && !force) {
-    return;
-  }
-
-  if (!force && now - lastSnapshotAt < SNAPSHOT_INTERVAL_MS) {
+function publishSnapshot(): void {
+  if (!simulation || !wasm || !snapshotDirty || availableBuffers.length === 0) {
     return;
   }
 
@@ -150,9 +144,20 @@ function maybePublishSnapshot(now: number, force = false): void {
   new Float32Array(buffer).set(source);
 
   snapshotDirty = false;
-  lastSnapshotAt = now;
+  postMessage(
+    {
+      type: "snapshot",
+      epoch,
+      buffer,
+      stats: readStats(),
+      highlightIndex: simulation.oldest_agent_index(),
+    },
+    [buffer],
+  );
+}
 
-  postMessage({ type: "snapshot", epoch, buffer, stats: readStats() }, [buffer]);
+function resetSnapshotClock(now = performance.now()): void {
+  nextSnapshotAt = now + SNAPSHOT_INTERVAL_MS;
 }
 
 function runTargetRate(now: number): void {
@@ -173,14 +178,14 @@ function runTargetRate(now: number): void {
   }
 }
 
-function runMaxRate(now: number): void {
-  previousTickAt = now;
+function runMaxRate(): void {
   stepRemainderSeconds = 0;
 
-  const deadline = now + MAX_MODE_CHUNK_MS;
+  // Step continuously until the next snapshot heartbeat, so each published frame advances a
+  // similar amount of wall-clock time and the cadence stays even.
   do {
     advanceSimulationSteps(MAX_MODE_BATCH_STEPS);
-  } while (performance.now() < deadline);
+  } while (performance.now() < nextSnapshotAt);
 }
 
 function scheduleLoop(delayMs: number): void {
@@ -191,6 +196,29 @@ function scheduleLoop(delayMs: number): void {
   loopTimer = workerScope.setTimeout(runLoop, delayMs);
 }
 
+function snapshotIsDue(now: number): boolean {
+  return now >= nextSnapshotAt;
+}
+
+function advanceSnapshotClock(now: number): void {
+  // Skip over any missed heartbeats (e.g. after a stall) so we resume on the grid instead of
+  // emitting a catch-up burst.
+  const missed = Math.floor((now - nextSnapshotAt) / SNAPSHOT_INTERVAL_MS) + 1;
+  nextSnapshotAt += missed * SNAPSHOT_INTERVAL_MS;
+}
+
+function nextLoopDelayMs(now: number): number {
+  if (paused) {
+    return PAUSED_LOOP_DELAY_MS;
+  }
+
+  if (simRate === "max") {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(SNAPSHOT_INTERVAL_MS, nextSnapshotAt - now));
+}
+
 function runLoop(): void {
   loopTimer = null;
 
@@ -199,20 +227,29 @@ function runLoop(): void {
       return;
     }
 
-    const now = performance.now();
-    if (!paused) {
-      if (simRate === "max") {
-        runMaxRate(now);
-      } else {
-        runTargetRate(now);
-      }
-    } else {
+    let now = performance.now();
+    if (paused) {
       resetStepClock(now);
+      resetSnapshotClock(now);
+      maybePostStats(now);
+      scheduleLoop(nextLoopDelayMs(now));
+      return;
     }
 
-    maybePublishSnapshot(performance.now());
-    maybePostStats(performance.now());
-    scheduleLoop(paused ? PAUSED_LOOP_DELAY_MS : 0);
+    if (simRate === "max") {
+      runMaxRate();
+    } else {
+      runTargetRate(now);
+    }
+
+    now = performance.now();
+    if (snapshotIsDue(now)) {
+      publishSnapshot();
+      advanceSnapshotClock(now);
+    }
+
+    maybePostStats(now);
+    scheduleLoop(nextLoopDelayMs(now));
   } catch (error) {
     postError(error);
   }
@@ -237,7 +274,7 @@ async function initialize(message: Extract<MainToWorkerMessage, { type: "init" }
   lastStatsStepCount = simulation.sim_steps();
   stepsPerSecond = 0;
   snapshotDirty = true;
-  lastSnapshotAt = Number.NEGATIVE_INFINITY;
+  nextSnapshotAt = performance.now();
 
   postMessage({
     type: "ready",
@@ -264,19 +301,17 @@ function resetSimulation(message: Extract<MainToWorkerMessage, { type: "reset" }
   lastStatsStepCount = simulation.sim_steps();
   stepsPerSecond = 0;
   snapshotDirty = true;
-  lastSnapshotAt = Number.NEGATIVE_INFINITY;
 
   const now = performance.now();
+  resetSnapshotClock(now);
   maybePostStats(now, true);
-  maybePublishSnapshot(now, true);
+  publishSnapshot();
 }
 
 function returnSnapshotBuffer(buffer: ArrayBuffer): void {
   if (buffer.byteLength > 0) {
     availableBuffers.push(buffer);
   }
-
-  maybePublishSnapshot(performance.now());
 }
 
 async function handleMessage(message: MainToWorkerMessage): Promise<void> {

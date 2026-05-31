@@ -68,7 +68,7 @@ Agents use a small one-hidden-layer neural network:
 - `OUTPUT_COUNT`: turn, acceleration, and RGB color targets.
 - `GENOME_LEN`: derived from the network shape and tested in Rust.
 
-Vision is ray-based. Each ray reports whether another agent was seen, normalized distance, and observed RGB color. Self inputs include normalized speed and capped age.
+Vision is ray-based, with a forward fan of rays spanning -90 to +90 degrees. Each ray reports whether another agent was seen, normalized distance, observed RGB color, and the seen agent's heading relative to the observer (normalized to [-1, 1]). Self inputs include normalized speed, capped age, and the agent's own RGB color.
 
 ## Development Commands
 

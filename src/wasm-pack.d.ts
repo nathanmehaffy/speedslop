@@ -11,6 +11,7 @@ declare module "*speedslop.js" {
     deaths(): number;
     sim_steps(): number;
     generation(): number;
+    oldest_agent_index(): number;
     agent_ptr(): number;
     agent_f32_len(): number;
     agent_stride_f32(): number;

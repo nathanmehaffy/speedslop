@@ -7,12 +7,15 @@ import type {
   WorkerToMainMessage,
 } from "./simulation-messages";
 
-const WORLD_SIZE = 4096;
+const WORLD_SIZE = 8192;
 const POPULATION = 10_000;
 const INITIAL_SEED = 1;
-const SNAPSHOT_BUFFER_COUNT = 3;
+const SNAPSHOT_BUFFER_COUNT = 4;
 const ARROW_LENGTH_WORLD_UNITS = 18;
 const ARROW_LOCAL_LENGTH = 2.2;
+// Half-size of the elder glow quad, expressed in the same local units as the agent triangle.
+const GLOW_RADIUS_LOCAL = 6.0;
+const NO_HIGHLIGHT = -1;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 64;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
@@ -28,8 +31,10 @@ type WebGpuState = {
   viewBuffer: GPUBuffer;
   bindGroup: GPUBindGroup;
   gridBindGroup: GPUBindGroup;
+  glowBindGroup: GPUBindGroup;
   pipeline: GPURenderPipeline;
   gridPipeline: GPURenderPipeline;
+  glowPipeline: GPURenderPipeline;
   format: GPUTextureFormat;
 };
 
@@ -84,6 +89,9 @@ const resetViewButton = queryRequired<HTMLButtonElement>("#reset-view");
 const seedInput = queryRequired<HTMLInputElement>("#seed");
 const speedSelect = queryRequired<HTMLSelectElement>("#speed");
 const renderFpsSelect = queryRequired<HTMLSelectElement>("#render-fps");
+
+// Index of the agent to render with the elder glow, or NO_HIGHLIGHT for none. Updated per snapshot.
+let highlightAgentIndex = NO_HIGHLIGHT;
 
 function setStatus(message: string): void {
   statusEl.textContent = message;
@@ -247,7 +255,7 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
         camera_x: f32,
         camera_y: f32,
         zoom: f32,
-        _pad0: f32,
+        highlight_index: f32,
         _pad1: f32,
         _pad2: f32,
       };
@@ -292,16 +300,21 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
           local = vec2f(-0.85, 0.48);
         }
 
+        let is_highlight =
+          view.highlight_index >= 0.0 && agent_index == u32(view.highlight_index);
+        let size_scale = select(1.0, 1.35, is_highlight);
+        let brightness = select(1.0, 1.7, is_highlight);
+
         let direction = normalize(pose.zw);
         let side = vec2f(-direction.y, direction.x);
         let agent_delta = pose.xy + tile_offset - vec2f(view.camera_x, view.camera_y);
         let world_delta =
-          agent_delta + (direction * local.x + side * local.y) * view.arrow_scale;
+          agent_delta + (direction * local.x + side * local.y) * view.arrow_scale * size_scale;
         let speed_glow = 0.65 + appearance.a * 0.35;
 
         var output: VertexOutput;
         output.position = vec4f(delta_to_clip(world_delta), 0.0, 1.0);
-        output.color = vec4f(appearance.rgb * speed_glow, 1.0);
+        output.color = vec4f(min(appearance.rgb * speed_glow * brightness, vec3f(1.0)), 1.0);
         return output;
       }
 
@@ -321,7 +334,7 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
         camera_x: f32,
         camera_y: f32,
         zoom: f32,
-        _pad0: f32,
+        highlight_index: f32,
         _pad1: f32,
         _pad2: f32,
       };
@@ -393,6 +406,78 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     `,
   });
 
+  const glowShader = device.createShaderModule({
+    label: "elder-glow-shader",
+    code: `
+      struct View {
+        aspect: f32,
+        arrow_scale: f32,
+        camera_x: f32,
+        camera_y: f32,
+        zoom: f32,
+        highlight_index: f32,
+        _pad1: f32,
+        _pad2: f32,
+      };
+
+      struct VertexOutput {
+        @builtin(position) position: vec4f,
+        @location(0) local: vec2f,
+      };
+
+      @group(0) @binding(0) var<storage, read> agents: array<vec4f>;
+      @group(0) @binding(1) var<uniform> view: View;
+
+      fn delta_to_clip(delta: vec2f) -> vec2f {
+        let centered = delta * (2.0 * view.zoom);
+        if (view.aspect > 1.0) {
+          return vec2f(centered.x / view.aspect, -centered.y);
+        }
+
+        return vec2f(centered.x, -centered.y * view.aspect);
+      }
+
+      @vertex
+      fn vertex_main(
+        @builtin(vertex_index) vertex_index: u32,
+        @builtin(instance_index) instance_index: u32,
+      ) -> VertexOutput {
+        let tile_x = i32(instance_index % ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
+        let tile_y = i32(instance_index / ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
+        let tile_offset = vec2f(f32(tile_x), f32(tile_y));
+
+        let base = u32(view.highlight_index) * 2u;
+        let pose = agents[base];
+
+        var corners = array<vec2f, 6>(
+          vec2f(-1.0, -1.0),
+          vec2f(1.0, -1.0),
+          vec2f(-1.0, 1.0),
+          vec2f(-1.0, 1.0),
+          vec2f(1.0, -1.0),
+          vec2f(1.0, 1.0),
+        );
+        let local = corners[vertex_index];
+        let glow_radius = view.arrow_scale * ${GLOW_RADIUS_LOCAL.toFixed(1)};
+        let agent_delta = pose.xy + tile_offset - vec2f(view.camera_x, view.camera_y);
+        let world_delta = agent_delta + local * glow_radius;
+
+        var output: VertexOutput;
+        output.position = vec4f(delta_to_clip(world_delta), 0.0, 1.0);
+        output.local = local;
+        return output;
+      }
+
+      @fragment
+      fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
+        let dist = length(input.local);
+        let falloff = pow(clamp(1.0 - dist, 0.0, 1.0), 2.0);
+        let color = vec3f(1.0, 0.86, 0.45);
+        return vec4f(color * falloff, falloff);
+      }
+    `,
+  });
+
   const pipeline = device.createRenderPipeline({
     label: "agent-instancing-pipeline",
     layout: "auto",
@@ -459,9 +544,51 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     },
   });
 
+  const glowPipeline = device.createRenderPipeline({
+    label: "elder-glow-pipeline",
+    layout: "auto",
+    vertex: {
+      module: glowShader,
+      entryPoint: "vertex_main",
+    },
+    fragment: {
+      module: glowShader,
+      entryPoint: "fragment_main",
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "one",
+              dstFactor: "one",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+  });
+
   const bindGroup = device.createBindGroup({
     label: "agent-instancing-bind-group",
     layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: agentBuffer } },
+      { binding: 1, resource: { buffer: viewBuffer } },
+    ],
+  });
+
+  const glowBindGroup = device.createBindGroup({
+    label: "elder-glow-bind-group",
+    layout: glowPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: agentBuffer } },
       { binding: 1, resource: { buffer: viewBuffer } },
@@ -482,8 +609,10 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     viewBuffer,
     bindGroup,
     gridBindGroup,
+    glowBindGroup,
     pipeline,
     gridPipeline,
+    glowPipeline,
     format,
   };
 }
@@ -501,7 +630,7 @@ function updateViewUniform(gpu: WebGpuState, camera: CameraState): void {
     camera.centerX,
     camera.centerY,
     camera.zoom,
-    0,
+    highlightAgentIndex,
     0,
     0,
   ]);
@@ -607,7 +736,7 @@ function setUpCameraControls(gpu: WebGpuState, camera: CameraState): void {
   });
 }
 
-function renderFrame(gpu: WebGpuState, population: number): void {
+function renderFrame(gpu: WebGpuState, population: number, drawHighlight: boolean): void {
   const encoder = gpu.device.createCommandEncoder({
     label: "agent-render-encoder",
   });
@@ -628,6 +757,12 @@ function renderFrame(gpu: WebGpuState, population: number): void {
   pass.setPipeline(gpu.gridPipeline);
   pass.setBindGroup(0, gpu.gridBindGroup);
   pass.draw(3);
+
+  if (drawHighlight) {
+    pass.setPipeline(gpu.glowPipeline);
+    pass.setBindGroup(0, gpu.glowBindGroup);
+    pass.draw(6, TILE_COPY_COUNT);
+  }
 
   pass.setPipeline(gpu.pipeline);
   pass.setBindGroup(0, gpu.bindGroup);
@@ -749,6 +884,7 @@ async function run(): Promise<void> {
   resetButton.addEventListener("click", () => {
     activeEpoch += 1;
     population = 0;
+    highlightAgentIndex = NO_HIGHLIGHT;
     clearLatestSnapshot();
     sendToWorker({ type: "reset", seed: parseSeed(), epoch: activeEpoch });
   });
@@ -775,11 +911,16 @@ async function run(): Promise<void> {
         latestSnapshot = null;
         uploadSnapshot(gpu, snapshot);
         population = snapshot.stats.population;
+        highlightAgentIndex =
+          snapshot.highlightIndex >= 0 && snapshot.highlightIndex < population
+            ? snapshot.highlightIndex
+            : NO_HIGHLIGHT;
+        updateViewUniform(gpu, camera);
         updateSimulationHud(snapshot.stats);
         returnSnapshotBuffer(snapshot.buffer);
       }
 
-      renderFrame(gpu, population);
+      renderFrame(gpu, population, highlightAgentIndex !== NO_HIGHLIGHT);
       updateFps(now, fpsState);
       lastRenderAt = now;
     }

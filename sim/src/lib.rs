@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::*;
 
-const DEFAULT_WORLD_SIZE: f32 = 4096.0;
+const DEFAULT_WORLD_SIZE: f32 = 8192.0;
 const DEFAULT_POPULATION: usize = 10_000;
 const MAX_POPULATION: usize = 100_000;
 
@@ -11,8 +11,12 @@ const FIXED_STEP_SECONDS: f32 = 1.0 / 60.0;
 const MAX_STEPS_PER_TICK: u32 = 8;
 
 const RENDER_STRIDE_FLOATS: usize = 8;
-const INPUT_COUNT: usize = 37;
-const RAY_COUNT: usize = 7;
+const RAY_COUNT: usize = 9;
+// Per ray: hit flag, proximity, seen R, seen G, seen B, relative heading.
+const RAY_INPUTS: usize = 6;
+// Self: normalized speed, capped age, own R, own G, own B.
+const SELF_INPUTS: usize = 5;
+const INPUT_COUNT: usize = RAY_COUNT * RAY_INPUTS + SELF_INPUTS;
 const HIDDEN_COUNT: usize = 8;
 const OUTPUT_COUNT: usize = 5;
 const GENOME_LEN: usize = HIDDEN_COUNT * (INPUT_COUNT + 1) + OUTPUT_COUNT * (HIDDEN_COUNT + 1);
@@ -30,6 +34,7 @@ const RAY_HALF_WIDTH: f32 = 7.0;
 const RAY_FORWARD_SLOP: f32 = 0.055;
 
 const RAY_COS: [f32; RAY_COUNT] = [
+    0.0,
     0.5,
     0.766_044_44,
     0.939_692_6,
@@ -37,8 +42,10 @@ const RAY_COS: [f32; RAY_COUNT] = [
     0.939_692_6,
     0.766_044_44,
     0.5,
+    0.0,
 ];
 const RAY_SIN: [f32; RAY_COUNT] = [
+    -1.0,
     -0.866_025_4,
     -0.642_787_64,
     -0.342_020_15,
@@ -46,22 +53,24 @@ const RAY_SIN: [f32; RAY_COUNT] = [
     0.342_020_15,
     0.642_787_64,
     0.866_025_4,
+    1.0,
 ];
 
 const AGENT_LENGTH: f32 = 10.0;
 const HEAD_OFFSET: f32 = AGENT_LENGTH * 0.55;
-const BODY_BACK: f32 = -HEAD_OFFSET * 0.9;
-const BODY_FRONT: f32 = HEAD_OFFSET * 0.3;
-const BODY_HALF_WIDTH: f32 = 2.8;
+const BODY_BACK: f32 = -HEAD_OFFSET * 0.6;
+const BODY_FRONT: f32 = HEAD_OFFSET * 0.2;
+const BODY_HALF_WIDTH: f32 = 2.0;
 const HEAD_ON_RADIUS: f32 = 4.5;
 const HEAD_ON_RADIUS_SQUARED: f32 = HEAD_ON_RADIUS * HEAD_ON_RADIUS;
 const HEAD_ON_DOT: f32 = -0.75;
+const COLLISION_GRACE_SECONDS: f32 = 1.0;
 
-const MATE_RADIUS: f32 = 10.0;
+const MATE_RADIUS: f32 = 16.0;
 const MATE_RADIUS_SQUARED: f32 = MATE_RADIUS * MATE_RADIUS;
-const MATE_ALIGNMENT_DOT: f32 = 0.95;
-const MIN_MATE_AGE_SECONDS: f32 = 4.0;
-const MATE_DURATION_SECONDS: f32 = 1.5;
+const MATE_ALIGNMENT_DOT: f32 = 0.85;
+const MIN_MATE_AGE_SECONDS: f32 = 2.0;
+const MATE_DURATION_SECONDS: f32 = 0.8;
 
 const AGE_INPUT_CAP_SECONDS: f32 = 30.0;
 const MUTATION_RATE: f32 = 0.03;
@@ -236,6 +245,19 @@ impl Simulation {
 
     pub fn generation(&self) -> u32 {
         self.generation.iter().copied().max().unwrap_or(0)
+    }
+
+    /// Index of the current longest-living (oldest) agent, used purely for render highlighting.
+    pub fn oldest_agent_index(&self) -> u32 {
+        let mut best = 0;
+        let mut best_age = f32::NEG_INFINITY;
+        for index in 0..self.population {
+            if self.age[index] > best_age {
+                best_age = self.age[index];
+                best = index;
+            }
+        }
+        best as u32
     }
 
     pub fn agent_ptr(&self) -> *const f32 {
@@ -414,22 +436,26 @@ impl Simulation {
             let ray_dx = dir_x * RAY_COS[ray] - dir_y * RAY_SIN[ray];
             let ray_dy = dir_x * RAY_SIN[ray] + dir_y * RAY_COS[ray];
 
-            let (distance, r, g, b) = self.cast_ray(index, origin_x, origin_y, ray_dx, ray_dy);
+            let hit = self.cast_ray(index, origin_x, origin_y, ray_dx, ray_dy);
 
-            if distance < VISION_RANGE {
-                let base = ray * 5;
+            if hit.distance < VISION_RANGE {
+                let base = ray * RAY_INPUTS;
                 inputs[base] = 1.0;
-                inputs[base + 1] = 1.0 - distance / VISION_RANGE;
-                inputs[base + 2] = r;
-                inputs[base + 3] = g;
-                inputs[base + 4] = b;
+                inputs[base + 1] = 1.0 - hit.distance / VISION_RANGE;
+                inputs[base + 2] = hit.r;
+                inputs[base + 3] = hit.g;
+                inputs[base + 4] = hit.b;
+                inputs[base + 5] = relative_heading(dir_x, dir_y, hit.dir_x, hit.dir_y);
             }
         }
 
-        let self_base = RAY_COUNT * 5;
+        let self_base = RAY_COUNT * RAY_INPUTS;
         inputs[self_base] =
             ((self.speed[index] - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)).clamp(0.0, 1.0);
         inputs[self_base + 1] = (self.age[index] / AGE_INPUT_CAP_SECONDS).clamp(0.0, 1.0);
+        inputs[self_base + 2] = self.color_r[index];
+        inputs[self_base + 3] = self.color_g[index];
+        inputs[self_base + 4] = self.color_b[index];
     }
 
     fn cast_ray(
@@ -439,12 +465,8 @@ impl Simulation {
         origin_y: f32,
         ray_dx: f32,
         ray_dy: f32,
-    ) -> (f32, f32, f32, f32) {
-        let mut hit_distance = VISION_RANGE;
-        let mut hit_r = 0.0;
-        let mut hit_g = 0.0;
-        let mut hit_b = 0.0;
-
+    ) -> RayHit {
+        let mut hit = RayHit::miss();
         let mut sample_distance = RAY_SAMPLE_STEP;
         let mut previous_cell = usize::MAX;
 
@@ -472,28 +494,30 @@ impl Simulation {
                 let dx = wrap_delta(self.pos_x[other] - origin_x, self.world_size);
                 let dy = wrap_delta(self.pos_y[other] - origin_y, self.world_size);
                 let forward = dx * ray_dx + dy * ray_dy;
-                if forward <= 0.0 || forward > VISION_RANGE || forward >= hit_distance {
+                if forward <= 0.0 || forward > VISION_RANGE || forward >= hit.distance {
                     continue;
                 }
 
                 let lateral = (dx * -ray_dy + dy * ray_dx).abs();
                 let width = RAY_HALF_WIDTH + forward * RAY_FORWARD_SLOP;
                 if lateral <= width {
-                    hit_distance = forward;
-                    hit_r = self.color_r[other];
-                    hit_g = self.color_g[other];
-                    hit_b = self.color_b[other];
+                    hit.distance = forward;
+                    hit.r = self.color_r[other];
+                    hit.g = self.color_g[other];
+                    hit.b = self.color_b[other];
+                    hit.dir_x = self.dir_x[other];
+                    hit.dir_y = self.dir_y[other];
                 }
             }
 
-            if hit_distance < VISION_RANGE {
+            if hit.distance < VISION_RANGE {
                 break;
             }
 
             sample_distance += RAY_SAMPLE_STEP;
         }
 
-        (hit_distance, hit_r, hit_g, hit_b)
+        hit
     }
 
     fn evaluate_network(
@@ -647,6 +671,12 @@ impl Simulation {
                         cursor = self.grid_next[other];
 
                         if other == index {
+                            continue;
+                        }
+
+                        if self.age[index] < COLLISION_GRACE_SECONDS
+                            || self.age[other] < COLLISION_GRACE_SECONDS
+                        {
                             continue;
                         }
 
@@ -935,8 +965,38 @@ fn sanitize_population(population: u32) -> usize {
     }
 }
 
+struct RayHit {
+    distance: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    dir_x: f32,
+    dir_y: f32,
+}
+
+impl RayHit {
+    fn miss() -> RayHit {
+        RayHit {
+            distance: VISION_RANGE,
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            dir_x: 1.0,
+            dir_y: 0.0,
+        }
+    }
+}
+
 fn output_to_color(output: f32) -> f32 {
     (output * 0.5 + 0.5).clamp(0.0, 1.0)
+}
+
+/// Signed heading of `(other_dx, other_dy)` relative to `(self_dx, self_dy)`, normalized to
+/// [-1, 1] (i.e. angle / PI). 0 means aligned, +/-1 means head-to-head opposing.
+fn relative_heading(self_dx: f32, self_dy: f32, other_dx: f32, other_dy: f32) -> f32 {
+    let dot = self_dx * other_dx + self_dy * other_dy;
+    let cross = self_dx * other_dy - self_dy * other_dx;
+    cross.atan2(dot) * std::f32::consts::FRAC_1_PI
 }
 
 fn mutate_genome_with_rate(genome: &mut [f32], rng: &mut SmallRng, mutation_rate: f32) {
@@ -1001,8 +1061,8 @@ mod tests {
 
     #[test]
     fn genome_len_matches_network_contract() {
-        assert_eq!(INPUT_COUNT, 37);
-        assert_eq!(GENOME_LEN, 349);
+        assert_eq!(INPUT_COUNT, 59);
+        assert_eq!(GENOME_LEN, 525);
     }
 
     #[test]
@@ -1053,6 +1113,8 @@ mod tests {
         sim.pos_y[1] = 50.0;
         sim.dir_x[1] = 1.0;
         sim.dir_y[1] = 0.0;
+        sim.age[0] = COLLISION_GRACE_SECONDS + 1.0;
+        sim.age[1] = COLLISION_GRACE_SECONDS + 1.0;
         sim.rebuild_grid();
 
         sim.resolve_collisions();
@@ -1073,6 +1135,8 @@ mod tests {
         sim.pos_y[1] = 50.0;
         sim.dir_x[1] = -1.0;
         sim.dir_y[1] = 0.0;
+        sim.age[0] = COLLISION_GRACE_SECONDS + 1.0;
+        sim.age[1] = COLLISION_GRACE_SECONDS + 1.0;
         sim.rebuild_grid();
 
         sim.resolve_collisions();
@@ -1324,7 +1388,7 @@ mod tests {
     #[test]
     fn shape_contracts_hold() {
         assert_eq!(RENDER_STRIDE_FLOATS, 8);
-        assert_eq!(INPUT_COUNT, RAY_COUNT * 5 + 2);
+        assert_eq!(INPUT_COUNT, RAY_COUNT * RAY_INPUTS + SELF_INPUTS);
         assert_eq!(
             GENOME_LEN,
             HIDDEN_COUNT * (INPUT_COUNT + 1) + OUTPUT_COUNT * (HIDDEN_COUNT + 1)
@@ -1474,12 +1538,12 @@ mod tests {
         sim.write_vision_inputs(0, &mut inputs);
 
         for ray in 0..RAY_COUNT {
-            let base = ray * 5;
-            for k in 0..5 {
+            let base = ray * RAY_INPUTS;
+            for k in 0..RAY_INPUTS {
                 assert_eq!(inputs[base + k], 0.0, "ray {ray} component {k} should be empty");
             }
         }
-        let self_base = RAY_COUNT * 5;
+        let self_base = RAY_COUNT * RAY_INPUTS;
         assert_eq!(inputs[self_base], 0.0);
         assert_eq!(inputs[self_base + 1], 0.0);
     }
@@ -1489,14 +1553,20 @@ mod tests {
         let mut sim = Simulation::new(256.0, 1, 1);
         place(&mut sim, 0, 100.0, 100.0, 1.0, 0.0);
         sim.rebuild_grid();
-        let self_base = RAY_COUNT * 5;
+        let self_base = RAY_COUNT * RAY_INPUTS;
         let mut inputs = [0.0f32; INPUT_COUNT];
 
         sim.speed[0] = (MIN_SPEED + MAX_SPEED) * 0.5;
         sim.age[0] = AGE_INPUT_CAP_SECONDS * 0.5;
+        sim.color_r[0] = 0.1;
+        sim.color_g[0] = 0.5;
+        sim.color_b[0] = 0.9;
         sim.write_vision_inputs(0, &mut inputs);
         assert!((inputs[self_base] - 0.5).abs() < 1e-5);
         assert!((inputs[self_base + 1] - 0.5).abs() < 1e-5);
+        assert!((inputs[self_base + 2] - 0.1).abs() < 1e-5);
+        assert!((inputs[self_base + 3] - 0.5).abs() < 1e-5);
+        assert!((inputs[self_base + 4] - 0.9).abs() < 1e-5);
 
         sim.speed[0] = MAX_SPEED;
         sim.age[0] = AGE_INPUT_CAP_SECONDS * 2.0;
@@ -1517,13 +1587,14 @@ mod tests {
 
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
-        let base = 3 * 5;
+        let base = RAY_COUNT / 2 * RAY_INPUTS;
         assert_eq!(inputs[base], 1.0);
         let expected_dist = 1.0 - 40.0 / VISION_RANGE;
         assert!((inputs[base + 1] - expected_dist).abs() < 1e-4);
         assert!((inputs[base + 2] - 0.2).abs() < 1e-5);
         assert!((inputs[base + 3] - 0.4).abs() < 1e-5);
         assert!((inputs[base + 4] - 0.6).abs() < 1e-5);
+        assert!(inputs[base + 5].abs() < 1e-5, "aligned agent has zero relative heading");
     }
 
     #[test]
@@ -1536,7 +1607,7 @@ mod tests {
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
         for ray in 0..RAY_COUNT {
-            assert_eq!(inputs[ray * 5], 0.0);
+            assert_eq!(inputs[ray * RAY_INPUTS], 0.0);
         }
     }
 
@@ -1549,7 +1620,7 @@ mod tests {
 
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
-        assert_eq!(inputs[3 * 5], 0.0);
+        assert_eq!(inputs[RAY_COUNT / 2 * RAY_INPUTS], 0.0);
     }
 
     #[test]
@@ -1560,13 +1631,17 @@ mod tests {
         sim.rebuild_grid();
         let mut inside = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inside);
-        assert_eq!(inside[3 * 5], 1.0, "just inside lateral width");
+        assert_eq!(inside[RAY_COUNT / 2 * RAY_INPUTS], 1.0, "just inside lateral width");
 
         place(&mut sim, 1, 140.0, 112.0, 1.0, 0.0);
         sim.rebuild_grid();
         let mut outside = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut outside);
-        assert_eq!(outside[3 * 5], 0.0, "just outside center-ray lateral width");
+        assert_eq!(
+            outside[RAY_COUNT / 2 * RAY_INPUTS],
+            0.0,
+            "just outside center-ray lateral width"
+        );
     }
 
     #[test]
@@ -1581,7 +1656,7 @@ mod tests {
 
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
-        let base = 3 * 5;
+        let base = RAY_COUNT / 2 * RAY_INPUTS;
         assert_eq!(inputs[base], 1.0);
         let expected = 1.0 - 30.0 / VISION_RANGE;
         assert!((inputs[base + 1] - expected).abs() < 1e-4);
@@ -1598,7 +1673,7 @@ mod tests {
 
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
-        let base = 3 * 5;
+        let base = RAY_COUNT / 2 * RAY_INPUTS;
         assert_eq!(inputs[base], 1.0);
         let expected = 1.0 - 40.0 / VISION_RANGE;
         assert!((inputs[base + 1] - expected).abs() < 1e-3);
@@ -1616,7 +1691,7 @@ mod tests {
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
         assert_eq!(inputs[0], 1.0, "target should register in ray 0");
-        assert_eq!(inputs[3 * 5], 0.0, "center ray should stay empty");
+        assert_eq!(inputs[RAY_COUNT / 2 * RAY_INPUTS], 0.0, "center ray should stay empty");
     }
 
     #[test]
@@ -1628,8 +1703,47 @@ mod tests {
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
         for ray in 0..RAY_COUNT {
-            assert_eq!(inputs[ray * 5], 0.0);
+            assert_eq!(inputs[ray * RAY_INPUTS], 0.0);
         }
+    }
+
+    #[test]
+    fn relative_heading_maps_alignment_to_signed_unit() {
+        assert!(relative_heading(1.0, 0.0, 1.0, 0.0).abs() < 1e-6);
+        assert!((relative_heading(1.0, 0.0, -1.0, 0.0).abs() - 1.0).abs() < 1e-6);
+        assert!((relative_heading(1.0, 0.0, 0.0, 1.0) - 0.5).abs() < 1e-6);
+        assert!((relative_heading(1.0, 0.0, 0.0, -1.0) + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vision_reports_relative_heading_of_seen_agent() {
+        let mut sim = Simulation::new(256.0, 2, 1);
+        place(&mut sim, 0, 100.0, 100.0, 1.0, 0.0);
+        // Target ahead, facing +y (90 degrees off the observer's heading).
+        place(&mut sim, 1, 140.0, 100.0, 0.0, 1.0);
+        sim.rebuild_grid();
+
+        let mut inputs = [0.0f32; INPUT_COUNT];
+        sim.write_vision_inputs(0, &mut inputs);
+        let base = RAY_COUNT / 2 * RAY_INPUTS;
+        assert_eq!(inputs[base], 1.0);
+        assert!((inputs[base + 5] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vision_includes_ninety_degree_rays() {
+        let mut sim = Simulation::new(256.0, 3, 1);
+        place(&mut sim, 0, 100.0, 100.0, 1.0, 0.0);
+        // Directly left (+90) and directly right (-90) of a +x facing agent.
+        place(&mut sim, 1, 100.0, 140.0, 1.0, 0.0);
+        place(&mut sim, 2, 100.0, 60.0, 1.0, 0.0);
+        sim.rebuild_grid();
+
+        let mut inputs = [0.0f32; INPUT_COUNT];
+        sim.write_vision_inputs(0, &mut inputs);
+        let last_ray = (RAY_COUNT - 1) * RAY_INPUTS;
+        assert_eq!(inputs[last_ray], 1.0, "+90 degree ray should see the left agent");
+        assert_eq!(inputs[0], 1.0, "-90 degree ray should see the right agent");
     }
 
     // ----------------------------------------------------------------------------------------
@@ -1843,6 +1957,8 @@ mod tests {
         let mut sim = Simulation::new(128.0, 2, 1);
         place(&mut sim, 0, 50.0, 50.0, 1.0, 0.0);
         place(&mut sim, 1, 55.5, 50.0, 1.0, 0.0);
+        sim.age[0] = COLLISION_GRACE_SECONDS + 1.0;
+        sim.age[1] = COLLISION_GRACE_SECONDS + 1.0;
         sim.rebuild_grid();
         sim.resolve_collisions();
         let deaths_first = sim.deaths();
@@ -1862,6 +1978,8 @@ mod tests {
         let mut sim = Simulation::new(world, 2, 1);
         place(&mut sim, 0, world - 1.0, 50.0, 1.0, 0.0);
         place(&mut sim, 1, 3.5, 50.0, 1.0, 0.0);
+        sim.age[0] = COLLISION_GRACE_SECONDS + 1.0;
+        sim.age[1] = COLLISION_GRACE_SECONDS + 1.0;
         sim.rebuild_grid();
         sim.resolve_collisions();
         assert_eq!(sim.deaths(), 1);
@@ -2093,6 +2211,20 @@ mod tests {
         let high = if sim.generation[0] == 1 { 0 } else { 1 };
         sim.reset_random_agent(high);
         assert_eq!(sim.generation(), 0, "generation must reflect current max, not peak");
+    }
+
+    #[test]
+    fn oldest_agent_index_reports_max_age() {
+        let mut sim = Simulation::new(256.0, 5, 7);
+        sim.age[0] = 1.0;
+        sim.age[1] = 4.0;
+        sim.age[2] = 9.5;
+        sim.age[3] = 2.0;
+        sim.age[4] = 0.0;
+        assert_eq!(sim.oldest_agent_index(), 2);
+
+        sim.age[4] = 100.0;
+        assert_eq!(sim.oldest_agent_index(), 4);
     }
 
     // ----------------------------------------------------------------------------------------

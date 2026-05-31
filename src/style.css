@@ -153,6 +153,12 @@ select {
 .controls select {
   min-width: 76px;
   padding: 0 6px;
+  background-color: #11161d;
+}
+
+.controls select option {
+  background-color: #11161d;
+  color: #f5fff9;
 }
 
 @media (max-width: 520px) {

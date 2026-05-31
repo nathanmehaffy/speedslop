@@ -61,6 +61,7 @@ export type WorkerSnapshotMessage = {
   epoch: number;
   buffer: ArrayBuffer;
   stats: SimulationStats;
+  highlightIndex: number;
 };
 
 export type WorkerStatsMessage = {
