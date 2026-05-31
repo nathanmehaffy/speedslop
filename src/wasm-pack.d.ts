@@ -1,12 +1,17 @@
 declare module "*speedslop.js" {
   export class Simulation {
-    constructor(width: number, height: number);
+    constructor(world_size: number, population: number, seed: number);
     tick(dt_seconds: number): void;
-    reset(): void;
-    width(): number;
-    height(): number;
-    frame_ptr(): number;
-    frame_len(): number;
+    reset(seed: number): void;
+    world_size(): number;
+    population(): number;
+    births(): number;
+    deaths(): number;
+    sim_steps(): number;
+    generation(): number;
+    agent_ptr(): number;
+    agent_f32_len(): number;
+    agent_stride_f32(): number;
   }
 
   export type InitInput =

@@ -7,9 +7,32 @@
   </head>
   <body>
     <canvas id="viewport" aria-label="SpeedSlop simulation"></canvas>
-    <div id="hud" aria-live="polite">
-      <span id="status">Initializing</span>
-      <span id="fps">0 FPS</span>
+    <div id="hud">
+      <div class="metrics" aria-live="polite">
+        <span id="status">Initializing</span>
+        <span id="fps">0 FPS</span>
+        <span id="population">0 agents</span>
+        <span id="births">0 births</span>
+        <span id="deaths">0 deaths</span>
+        <span id="generation">gen 0</span>
+      </div>
+      <div class="controls">
+        <button id="pause" type="button" aria-pressed="false">Pause</button>
+        <button id="reset" type="button">Reset</button>
+        <label>
+          Seed
+          <input id="seed" type="number" min="0" step="1" inputmode="numeric" />
+        </label>
+        <label>
+          Speed
+          <select id="speed">
+            <option value="0.25">0.25x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="5">5x</option>
+          </select>
+        </label>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
