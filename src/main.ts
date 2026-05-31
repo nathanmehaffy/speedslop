@@ -1,10 +1,16 @@
-import initWasm, { Simulation, type InitOutput } from "../sim/pkg/speedslop.js";
 import "./style.css";
+import type {
+  MainToWorkerMessage,
+  SimRate,
+  SimulationStats,
+  WorkerSnapshotMessage,
+  WorkerToMainMessage,
+} from "./simulation-messages";
 
 const WORLD_SIZE = 4096;
 const POPULATION = 10_000;
 const INITIAL_SEED = 1;
-const MAX_DELTA_SECONDS = 1 / 10;
+const SNAPSHOT_BUFFER_COUNT = 3;
 const ARROW_LENGTH_WORLD_UNITS = 18;
 const ARROW_LOCAL_LENGTH = 2.2;
 const MIN_ZOOM = 1;
@@ -67,6 +73,7 @@ function queryRequired<T extends Element>(selector: string): T {
 const canvas = queryRequired<HTMLCanvasElement>("#viewport");
 const statusEl = queryRequired<HTMLSpanElement>("#status");
 const fpsEl = queryRequired<HTMLSpanElement>("#fps");
+const stepsPerSecondEl = queryRequired<HTMLSpanElement>("#steps-per-second");
 const populationEl = queryRequired<HTMLSpanElement>("#population");
 const birthsEl = queryRequired<HTMLSpanElement>("#births");
 const deathsEl = queryRequired<HTMLSpanElement>("#deaths");
@@ -76,6 +83,7 @@ const resetButton = queryRequired<HTMLButtonElement>("#reset");
 const resetViewButton = queryRequired<HTMLButtonElement>("#reset-view");
 const seedInput = queryRequired<HTMLInputElement>("#seed");
 const speedSelect = queryRequired<HTMLSelectElement>("#speed");
+const renderFpsSelect = queryRequired<HTMLSelectElement>("#render-fps");
 
 function setStatus(message: string): void {
   statusEl.textContent = message;
@@ -480,12 +488,8 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
   };
 }
 
-function uploadAgents(gpu: WebGpuState, wasm: InitOutput, simulation: Simulation): void {
-  const ptr = simulation.agent_ptr();
-  const len = simulation.agent_f32_len();
-  const agents = new Float32Array(wasm.memory.buffer, ptr, len);
-
-  gpu.device.queue.writeBuffer(gpu.agentBuffer, 0, agents);
+function uploadSnapshot(gpu: WebGpuState, snapshot: WorkerSnapshotMessage): void {
+  gpu.device.queue.writeBuffer(gpu.agentBuffer, 0, new Float32Array(snapshot.buffer));
 }
 
 function updateViewUniform(gpu: WebGpuState, camera: CameraState): void {
@@ -644,11 +648,30 @@ function updateFps(now: number, state: FpsState): void {
   }
 }
 
-function updateSimulationHud(simulation: Simulation): void {
-  populationEl.textContent = `${simulation.population().toLocaleString()} agents`;
-  birthsEl.textContent = `${simulation.births().toLocaleString()} births`;
-  deathsEl.textContent = `${simulation.deaths().toLocaleString()} deaths`;
-  generationEl.textContent = `gen ${simulation.generation().toLocaleString()}`;
+function updateSimulationHud(stats: SimulationStats): void {
+  stepsPerSecondEl.textContent = `${stats.stepsPerSecond.toLocaleString()} steps/s`;
+  populationEl.textContent = `${stats.population.toLocaleString()} agents`;
+  birthsEl.textContent = `${stats.births.toLocaleString()} births`;
+  deathsEl.textContent = `${stats.deaths.toLocaleString()} deaths`;
+  generationEl.textContent = `gen ${stats.generation.toLocaleString()}`;
+}
+
+function parseSimRate(): SimRate {
+  if (speedSelect.value === "max") {
+    return "max";
+  }
+
+  const value = Number(speedSelect.value);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function renderFrameIntervalMs(): number {
+  if (renderFpsSelect.value === "display") {
+    return 0;
+  }
+
+  const fps = Number(renderFpsSelect.value);
+  return Number.isFinite(fps) && fps > 0 ? 1000 / fps : 0;
 }
 
 function parseSeed(): number {
@@ -666,14 +689,43 @@ async function run(): Promise<void> {
 
   seedInput.value = String(INITIAL_SEED);
 
-  const wasm = await initWasm();
-  const simulation = new Simulation(WORLD_SIZE, POPULATION, INITIAL_SEED);
-  const agentByteSize = simulation.agent_f32_len() * Float32Array.BYTES_PER_ELEMENT;
-  const gpu = await createWebGpuState(agentByteSize);
+  const worker = new Worker(new URL("./simulation-worker.ts", import.meta.url), {
+    type: "module",
+  });
   const camera = createDefaultCamera();
   const fpsState = { frames: 0, last: performance.now() };
-  let previous = performance.now();
+  let activeEpoch = 0;
+  let gpu: WebGpuState | null = null;
+  let latestSnapshot: WorkerSnapshotMessage | null = null;
+  let lastRenderAt = Number.NEGATIVE_INFINITY;
+  let population = 0;
+  let renderLoopStarted = false;
   let paused = false;
+
+  const setSimulationControlsEnabled = (enabled: boolean): void => {
+    pauseButton.disabled = !enabled;
+    resetButton.disabled = !enabled;
+    resetViewButton.disabled = !enabled;
+    speedSelect.disabled = !enabled;
+    renderFpsSelect.disabled = !enabled;
+  };
+
+  const sendToWorker = (message: MainToWorkerMessage, transfer: Transferable[] = []): void => {
+    worker.postMessage(message, transfer);
+  };
+
+  const returnSnapshotBuffer = (buffer: ArrayBuffer): void => {
+    sendToWorker({ type: "returnSnapshotBuffer", buffer }, [buffer]);
+  };
+
+  const clearLatestSnapshot = (): void => {
+    if (!latestSnapshot) {
+      return;
+    }
+
+    returnSnapshotBuffer(latestSnapshot.buffer);
+    latestSnapshot = null;
+  };
 
   const updatePauseButton = (): void => {
     pauseButton.textContent = paused ? "Resume" : "Pause";
@@ -683,43 +735,146 @@ async function run(): Promise<void> {
   pauseButton.addEventListener("click", () => {
     paused = !paused;
     updatePauseButton();
+    sendToWorker({ type: "setPaused", paused });
+  });
+
+  speedSelect.addEventListener("change", () => {
+    sendToWorker({ type: "setSimRate", simRate: parseSimRate() });
+  });
+
+  renderFpsSelect.addEventListener("change", () => {
+    lastRenderAt = Number.NEGATIVE_INFINITY;
   });
 
   resetButton.addEventListener("click", () => {
-    simulation.reset(parseSeed());
-    uploadAgents(gpu, wasm, simulation);
-    updateSimulationHud(simulation);
+    activeEpoch += 1;
+    population = 0;
+    clearLatestSnapshot();
+    sendToWorker({ type: "reset", seed: parseSeed(), epoch: activeEpoch });
   });
 
-  setStatus(`${gpu.adapter.info?.description || "WebGPU"} ready`);
-  setUpCameraControls(gpu, camera);
-  updatePauseButton();
-  uploadAgents(gpu, wasm, simulation);
-  updateViewUniform(gpu, camera);
-  updateSimulationHud(simulation);
-
   const loop = (now: number): void => {
+    if (!gpu) {
+      requestAnimationFrame(loop);
+      return;
+    }
+
     if (resizeCanvasToDisplaySize()) {
       updateViewUniform(gpu, camera);
     }
 
-    const dt = Math.min((now - previous) / 1000, MAX_DELTA_SECONDS);
-    previous = now;
+    const renderIntervalMs = renderFrameIntervalMs();
+    const shouldRender =
+      renderIntervalMs === 0 ||
+      lastRenderAt === Number.NEGATIVE_INFINITY ||
+      now - lastRenderAt >= renderIntervalMs - 0.5;
 
-    if (!paused) {
-      const speedScale = Number(speedSelect.value);
-      simulation.tick(dt * (Number.isFinite(speedScale) ? speedScale : 1));
+    if (shouldRender) {
+      if (latestSnapshot) {
+        const snapshot = latestSnapshot;
+        latestSnapshot = null;
+        uploadSnapshot(gpu, snapshot);
+        population = snapshot.stats.population;
+        updateSimulationHud(snapshot.stats);
+        returnSnapshotBuffer(snapshot.buffer);
+      }
+
+      renderFrame(gpu, population);
+      updateFps(now, fpsState);
+      lastRenderAt = now;
     }
-
-    uploadAgents(gpu, wasm, simulation);
-    renderFrame(gpu, simulation.population());
-    updateFps(now, fpsState);
-    updateSimulationHud(simulation);
 
     requestAnimationFrame(loop);
   };
 
-  requestAnimationFrame(loop);
+  const startRenderLoop = (): void => {
+    if (renderLoopStarted) {
+      return;
+    }
+
+    renderLoopStarted = true;
+    requestAnimationFrame(loop);
+  };
+
+  const handleReady = async (
+    message: Extract<WorkerToMainMessage, { type: "ready" }>,
+  ): Promise<void> => {
+    if (!gpu) {
+      const agentByteSize = message.agentF32Len * Float32Array.BYTES_PER_ELEMENT;
+      const nextGpu = await createWebGpuState(agentByteSize);
+      gpu = nextGpu;
+      setUpCameraControls(nextGpu, camera);
+      updateViewUniform(nextGpu, camera);
+
+      for (let i = 0; i < SNAPSHOT_BUFFER_COUNT; i += 1) {
+        returnSnapshotBuffer(new ArrayBuffer(agentByteSize));
+      }
+
+      setStatus(`${nextGpu.adapter.info?.description || "WebGPU"} ready`);
+      setSimulationControlsEnabled(true);
+      startRenderLoop();
+    }
+
+    if (message.epoch === activeEpoch) {
+      updateSimulationHud(message.stats);
+    }
+  };
+
+  worker.addEventListener("message", (event: MessageEvent<WorkerToMainMessage>) => {
+    const message = event.data;
+
+    switch (message.type) {
+      case "ready":
+        void handleReady(message).catch((error: unknown) => {
+          const text = error instanceof Error ? error.message : String(error);
+          setStatus(text);
+          fpsEl.textContent = "WebGPU unavailable";
+          console.error(error);
+        });
+        break;
+      case "snapshot":
+        if (message.epoch !== activeEpoch) {
+          returnSnapshotBuffer(message.buffer);
+          break;
+        }
+
+        clearLatestSnapshot();
+        latestSnapshot = message;
+        updateSimulationHud(message.stats);
+        break;
+      case "stats":
+        if (message.epoch === activeEpoch) {
+          updateSimulationHud(message.stats);
+        }
+        break;
+      case "error":
+        setStatus(message.message);
+        console.error(message.message);
+        break;
+    }
+  });
+
+  setSimulationControlsEnabled(false);
+  setStatus("Starting simulation worker");
+  updatePauseButton();
+  updateSimulationHud({
+    population: 0,
+    births: 0,
+    deaths: 0,
+    generation: 0,
+    simSteps: 0,
+    stepsPerSecond: 0,
+  });
+
+  sendToWorker({
+    type: "init",
+    worldSize: WORLD_SIZE,
+    population: POPULATION,
+    seed: INITIAL_SEED,
+    epoch: activeEpoch,
+    paused,
+    simRate: parseSimRate(),
+  });
 }
 
 run().catch((error: unknown) => {

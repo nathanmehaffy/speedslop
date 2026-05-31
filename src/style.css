@@ -84,6 +84,10 @@ select {
   color: #82ecd8;
 }
 
+#steps-per-second {
+  color: #a7f07a;
+}
+
 #births {
   color: #f2d35f;
 }
@@ -125,6 +129,12 @@ select {
 
 .controls button:active {
   transform: translateY(1px);
+}
+
+.controls button:disabled,
+.controls select:disabled {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .controls label {

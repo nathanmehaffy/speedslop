@@ -11,6 +11,7 @@
       <div class="metrics" aria-live="polite">
         <span id="status">Initializing</span>
         <span id="fps">0 FPS</span>
+        <span id="steps-per-second">0 steps/s</span>
         <span id="population">0 agents</span>
         <span id="births">0 births</span>
         <span id="deaths">0 deaths</span>
@@ -25,12 +26,22 @@
           <input id="seed" type="number" min="0" step="1" inputmode="numeric" />
         </label>
         <label>
-          Speed
+          Sim
           <select id="speed">
             <option value="0.25">0.25x</option>
             <option value="1" selected>1x</option>
             <option value="2">2x</option>
             <option value="5">5x</option>
+            <option value="max">Max</option>
+          </select>
+        </label>
+        <label>
+          Render
+          <select id="render-fps">
+            <option value="display" selected>Display</option>
+            <option value="60">60 FPS</option>
+            <option value="30">30 FPS</option>
+            <option value="15">15 FPS</option>
           </select>
         </label>
       </div>

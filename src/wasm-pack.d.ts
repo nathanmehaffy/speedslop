@@ -1,8 +1,10 @@
 declare module "*speedslop.js" {
   export class Simulation {
     constructor(world_size: number, population: number, seed: number);
+    advance_steps(step_count: number): void;
     tick(dt_seconds: number): void;
     reset(seed: number): void;
+    fixed_step_seconds(): number;
     world_size(): number;
     population(): number;
     births(): number;

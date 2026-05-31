@@ -187,6 +187,16 @@ impl Simulation {
         self.refresh_render_agents();
     }
 
+    pub fn advance_steps(&mut self, step_count: u32) {
+        for _ in 0..step_count {
+            self.step(FIXED_STEP_SECONDS);
+        }
+
+        if step_count > 0 {
+            self.refresh_render_agents();
+        }
+    }
+
     pub fn reset(&mut self, seed: u32) {
         self.accumulator = 0.0;
         self.steps = 0;
@@ -199,6 +209,10 @@ impl Simulation {
 
     pub fn world_size(&self) -> f32 {
         self.world_size
+    }
+
+    pub fn fixed_step_seconds(&self) -> f32 {
+        FIXED_STEP_SECONDS
     }
 
     pub fn population(&self) -> u32 {
@@ -2005,6 +2019,41 @@ mod tests {
     }
 
     #[test]
+    fn advance_steps_zero_is_noop() {
+        let mut sim = Simulation::new(256.0, 4, 1);
+        let before_steps = sim.sim_steps();
+        let before_render = sim.render_agents.clone();
+
+        sim.advance_steps(0);
+
+        assert_eq!(sim.sim_steps(), before_steps);
+        assert_eq!(sim.render_agents, before_render);
+    }
+
+    #[test]
+    fn advance_steps_runs_exact_fixed_steps() {
+        let mut sim = Simulation::new(256.0, 4, 1);
+
+        sim.advance_steps(1);
+        assert_eq!(sim.sim_steps(), 1);
+
+        sim.advance_steps(5);
+        assert_eq!(sim.sim_steps(), 6);
+        assert_eq!(sim.population(), 4);
+        assert_core_invariants(&sim);
+    }
+
+    #[test]
+    fn advance_steps_ignores_tick_accumulator() {
+        let mut sim = Simulation::new(256.0, 4, 1);
+        sim.tick(FIXED_STEP_SECONDS * 0.5);
+
+        sim.advance_steps(3);
+
+        assert_eq!(sim.sim_steps(), 3);
+    }
+
+    #[test]
     fn step_advances_counter_and_keeps_population() {
         let mut sim = Simulation::new(256.0, 16, 3);
         sim.step(FIXED_STEP_SECONDS);
@@ -2017,6 +2066,17 @@ mod tests {
     fn tick_refreshes_render_after_step() {
         let mut sim = Simulation::new(256.0, 4, 1);
         sim.tick(FIXED_STEP_SECONDS);
+        for i in 0..4 {
+            let base = i * RENDER_STRIDE_FLOATS;
+            let expected_x = sim.pos_x[i] / sim.world_size;
+            assert!((sim.render_agents[base] - expected_x).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn advance_steps_refreshes_render_after_batch() {
+        let mut sim = Simulation::new(256.0, 4, 1);
+        sim.advance_steps(3);
         for i in 0..4 {
             let base = i * RENDER_STRIDE_FLOATS;
             let expected_x = sim.pos_x[i] / sim.world_size;

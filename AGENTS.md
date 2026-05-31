@@ -99,6 +99,8 @@ Keep the simulation core heavily tested in Rust. Tests should cover invariants a
 
 Frontend changes should at least pass `npm run build`; simulation changes should also pass `cargo test --manifest-path sim/Cargo.toml`.
 
+Do not use the Codex browser tool for browser testing in this repo. The developer will run all browser testing manually in his own browser because that workflow is faster.
+
 ## Engineering Preferences
 
 This is a young project, so prefer direct, small, readable code over compatibility layers or defensive leftovers from previous versions. When changing architecture, remove obsolete paths instead of preserving unused alternatives.
