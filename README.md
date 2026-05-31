@@ -1,65 +1,37 @@
 # SpeedSlop
 
-High-performance browser evolutionary simulation using Rust, WebAssembly, Vite,
-TypeScript, and WebGPU.
+SpeedSlop is a browser-based evolutionary simulation. A Rust simulation core owns the
+agent state, compiles to WebAssembly, and runs in a web worker. The TypeScript frontend
+streams packed agent snapshots to WebGPU and renders the population as instanced
+triangles with a small HUD for speed, reset, camera, and stats.
 
-The simulation state is owned by WASM. The browser app drives the animation
-clock, reads a stable packed agent buffer from WASM, uploads it to WebGPU, and
-draws arrow-shaped agents with instanced triangles.
+The current simulation keeps 10,000 neural agents in a constant-size toroidal world.
+Agents sense neighbors with nine rays, steer with a tiny neural network, breed by
+proximity and alignment, die on side/body collisions after a short grace period, and
+are immediately replaced so the population never changes.
 
-## Prerequisites
+## Setup
 
-- Node.js and npm
-- Rust and Cargo
-- The `wasm32-unknown-unknown` target
-- `wasm-pack`
-
-Install the Rust pieces with:
+Install Node.js, Rust, `wasm-pack`, and the `wasm32-unknown-unknown` target:
 
 ```powershell
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
+npm install
 ```
 
-## Setup
+## Commands
 
 ```powershell
-npm install
-npm run dev
+npm run dev      # build WASM and start Vite on 127.0.0.1
+npm run build    # build WASM, type-check, and bundle production assets
+npm run check    # build WASM, type-check, and cargo-check the WASM target
+npm run bench    # run the worker-oriented simulation benchmark
+cargo test --manifest-path sim/Cargo.toml
 ```
 
-Then open the local Vite URL printed by the dev server.
-
-## Scripts
-
-- `npm run build:wasm` builds the Rust simulation crate with `wasm-pack`.
-- `npm run dev` builds WASM and starts the Vite dev server.
-- `npm run build` builds WASM, type-checks TypeScript, and creates a production
-  frontend bundle.
-- `npm run check` builds WASM, type-checks TypeScript, and runs `cargo check`
-  for the WASM target.
-- `npm run preview` serves the production bundle after `npm run build`.
-
-## Simulation API
-
-The Rust crate exports a `Simulation` class through `wasm-bindgen`:
-
-- `new(world_size, population, seed)` creates a deterministic toroidal world.
-- `tick(dt_seconds)` advances the fixed-step simulation.
-- `reset(seed)` reseeds the population and clears counters.
-- `world_size()` and `population()` expose world metadata.
-- `births()`, `deaths()`, `sim_steps()`, and `generation()` expose HUD stats.
-- `agent_ptr()`, `agent_f32_len()`, and `agent_stride_f32()` expose the stable
-  WASM-owned render buffer.
-
-The TypeScript app imports `Simulation` from the generated `sim/pkg` package.
-Each agent occupies eight `f32` values:
+The Rust render buffer layout is eight `f32` values per agent:
 
 ```text
 [x_norm, y_norm, dir_x, dir_y, r, g, b, speed_norm]
 ```
-
-The v1 simulation uses 10,000 neural-network-driven agents in a 4096 x 4096
-toroidal world. Each agent has seven forward vision rays, a small
-one-hidden-layer neural network, color output, proximity/alignment breeding,
-side/body collision deaths, and immediate random replacement for dead agents.

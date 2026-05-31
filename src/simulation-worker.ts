@@ -133,6 +133,8 @@ function publishSnapshot(): void {
     return;
   }
 
+  simulation.refresh_render_agents();
+
   const agentF32Len = simulation.agent_f32_len();
   const expectedBytes = agentF32Len * Float32Array.BYTES_PER_ELEMENT;
   if (buffer.byteLength !== expectedBytes) {

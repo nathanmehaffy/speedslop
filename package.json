@@ -8,6 +8,7 @@
     "dev": "npm run build:wasm && vite --host 127.0.0.1",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "check": "npm run build:wasm && tsc --noEmit && cargo check --manifest-path sim/Cargo.toml --target wasm32-unknown-unknown",
+    "bench": "npm run build:wasm && node scripts/bench.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {

@@ -6,6 +6,7 @@ use std::arch::wasm32::*;
 const DEFAULT_WORLD_SIZE: f32 = 8192.0;
 const DEFAULT_POPULATION: usize = 10_000;
 const MAX_POPULATION: usize = 100_000;
+const EMPTY_GRID_INDEX: usize = usize::MAX;
 
 const FIXED_STEP_SECONDS: f32 = 1.0 / 60.0;
 const MAX_STEPS_PER_TICK: u32 = 8;
@@ -28,8 +29,10 @@ const MAX_TURN_RATE: f32 = 4.0;
 const COLOR_BLEND_RATE: f32 = 4.0;
 
 const GRID_CELL_SIZE: f32 = 32.0;
+const INV_GRID_CELL_SIZE: f32 = 1.0 / GRID_CELL_SIZE;
 const VISION_RANGE: f32 = 96.0;
 const RAY_SAMPLE_STEP: f32 = GRID_CELL_SIZE * 0.5;
+const RAY_SAMPLE_COUNT: usize = 6;
 const RAY_HALF_WIDTH: f32 = 7.0;
 const RAY_FORWARD_SLOP: f32 = 0.055;
 
@@ -113,8 +116,8 @@ pub struct Simulation {
     bred: Vec<bool>,
 
     grid_cols: usize,
-    grid_heads: Vec<i32>,
-    grid_next: Vec<i32>,
+    grid_heads: Vec<usize>,
+    grid_next: Vec<usize>,
 
     render_agents: Vec<f32>,
 }
@@ -165,8 +168,8 @@ impl Simulation {
             bred: vec![false; population],
 
             grid_cols,
-            grid_heads: vec![-1; grid_len],
-            grid_next: vec![-1; population],
+            grid_heads: vec![EMPTY_GRID_INDEX; grid_len],
+            grid_next: vec![EMPTY_GRID_INDEX; population],
 
             render_agents: vec![0.0; population * RENDER_STRIDE_FLOATS],
         };
@@ -203,9 +206,23 @@ impl Simulation {
         for _ in 0..step_count {
             self.step(FIXED_STEP_SECONDS);
         }
+    }
 
-        if step_count > 0 {
-            self.refresh_render_agents();
+    pub fn refresh_render_agents(&mut self) {
+        let inv_world = 1.0 / self.world_size;
+        let inv_speed_range = 1.0 / (MAX_SPEED - MIN_SPEED);
+
+        for index in 0..self.population {
+            let base = index * RENDER_STRIDE_FLOATS;
+            self.render_agents[base] = self.pos_x[index] * inv_world;
+            self.render_agents[base + 1] = self.pos_y[index] * inv_world;
+            self.render_agents[base + 2] = self.dir_x[index];
+            self.render_agents[base + 3] = self.dir_y[index];
+            self.render_agents[base + 4] = self.color_r[index].clamp(0.0, 1.0);
+            self.render_agents[base + 5] = self.color_g[index].clamp(0.0, 1.0);
+            self.render_agents[base + 6] = self.color_b[index].clamp(0.0, 1.0);
+            self.render_agents[base + 7] =
+                ((self.speed[index] - MIN_SPEED) * inv_speed_range).clamp(0.0, 1.0);
         }
     }
 
@@ -327,8 +344,8 @@ impl Simulation {
     ) {
         let jitter_x = self.rng.next_signed_f32() * 1.5;
         let jitter_y = self.rng.next_signed_f32() * 1.5;
-        self.pos_x[victim] = wrap(self.pos_x[victim] + jitter_x, self.world_size);
-        self.pos_y[victim] = wrap(self.pos_y[victim] + jitter_y, self.world_size);
+        self.pos_x[victim] = wrap_near(self.pos_x[victim] + jitter_x, self.world_size);
+        self.pos_y[victim] = wrap_near(self.pos_y[victim] + jitter_y, self.world_size);
 
         let mut dx = self.dir_x[parent_a] + self.dir_x[parent_b];
         let mut dy = self.dir_y[parent_a] + self.dir_y[parent_b];
@@ -408,11 +425,11 @@ impl Simulation {
                 + self.accel_command[index].clamp(-1.0, 1.0) * ACCELERATION * dt)
                 .clamp(MIN_SPEED, MAX_SPEED);
 
-            self.pos_x[index] = wrap(
+            self.pos_x[index] = wrap_near(
                 self.pos_x[index] + self.dir_x[index] * self.speed[index] * dt,
                 self.world_size,
             );
-            self.pos_y[index] = wrap(
+            self.pos_y[index] = wrap_near(
                 self.pos_y[index] + self.dir_y[index] * self.speed[index] * dt,
                 self.world_size,
             );
@@ -458,6 +475,7 @@ impl Simulation {
         inputs[self_base + 4] = self.color_b[index];
     }
 
+    #[inline]
     fn cast_ray(
         &self,
         index: usize,
@@ -467,24 +485,23 @@ impl Simulation {
         ray_dy: f32,
     ) -> RayHit {
         let mut hit = RayHit::miss();
-        let mut sample_distance = RAY_SAMPLE_STEP;
         let mut previous_cell = usize::MAX;
 
-        while sample_distance <= VISION_RANGE {
-            let sample_x = wrap(origin_x + ray_dx * sample_distance, self.world_size);
-            let sample_y = wrap(origin_y + ray_dy * sample_distance, self.world_size);
+        for sample_index in 1..=RAY_SAMPLE_COUNT {
+            let sample_distance = sample_index as f32 * RAY_SAMPLE_STEP;
+            let sample_x = wrap_near(origin_x + ray_dx * sample_distance, self.world_size);
+            let sample_y = wrap_near(origin_y + ray_dy * sample_distance, self.world_size);
             let cell = self.cell_index(sample_x, sample_y);
 
             if cell == previous_cell {
-                sample_distance += RAY_SAMPLE_STEP;
                 continue;
             }
 
             previous_cell = cell;
             let mut cursor = self.grid_heads[cell];
 
-            while cursor >= 0 {
-                let other = cursor as usize;
+            while cursor != EMPTY_GRID_INDEX {
+                let other = cursor;
                 cursor = self.grid_next[other];
 
                 if other == index {
@@ -513,8 +530,6 @@ impl Simulation {
             if hit.distance < VISION_RANGE {
                 break;
             }
-
-            sample_distance += RAY_SAMPLE_STEP;
         }
 
         hit
@@ -587,13 +602,8 @@ impl Simulation {
 
             let mut i = 0;
             while i + 4 <= INPUT_COUNT {
-                let inp = f32x4(inputs[i], inputs[i + 1], inputs[i + 2], inputs[i + 3]);
-                let wgt = f32x4(
-                    self.genomes[weight_base + i],
-                    self.genomes[weight_base + i + 1],
-                    self.genomes[weight_base + i + 2],
-                    self.genomes[weight_base + i + 3],
-                );
+                let inp = v128_load(inputs.as_ptr().add(i) as *const v128);
+                let wgt = v128_load(self.genomes.as_ptr().add(weight_base + i) as *const v128);
                 sum = f32x4_add(sum, f32x4_mul(inp, wgt));
                 i += 4;
             }
@@ -620,13 +630,8 @@ impl Simulation {
 
             let mut i = 0;
             while i + 4 <= HIDDEN_COUNT {
-                let hid = f32x4(hidden[i], hidden[i + 1], hidden[i + 2], hidden[i + 3]);
-                let wgt = f32x4(
-                    self.genomes[weight_base + i],
-                    self.genomes[weight_base + i + 1],
-                    self.genomes[weight_base + i + 2],
-                    self.genomes[weight_base + i + 3],
-                );
+                let hid = v128_load(hidden.as_ptr().add(i) as *const v128);
+                let wgt = v128_load(self.genomes.as_ptr().add(weight_base + i) as *const v128);
                 sum = f32x4_add(sum, f32x4_mul(hid, wgt));
                 i += 4;
             }
@@ -650,11 +655,11 @@ impl Simulation {
         self.dead.fill(false);
 
         for index in 0..self.population {
-            let head_x = wrap(
+            let head_x = wrap_near(
                 self.pos_x[index] + self.dir_x[index] * HEAD_OFFSET,
                 self.world_size,
             );
-            let head_y = wrap(
+            let head_y = wrap_near(
                 self.pos_y[index] + self.dir_y[index] * HEAD_OFFSET,
                 self.world_size,
             );
@@ -666,8 +671,8 @@ impl Simulation {
                     let cell = self.wrapped_cell_index(cell_x, cell_y);
                     let mut cursor = self.grid_heads[cell];
 
-                    while cursor >= 0 {
-                        let other = cursor as usize;
+                    while cursor != EMPTY_GRID_INDEX {
+                        let other = cursor;
                         cursor = self.grid_next[other];
 
                         if other == index {
@@ -704,6 +709,7 @@ impl Simulation {
         }
     }
 
+    #[inline]
     fn hits_body_side(&self, head_x: f32, head_y: f32, target: usize) -> bool {
         let dx = wrap_delta(head_x - self.pos_x[target], self.world_size);
         let dy = wrap_delta(head_y - self.pos_y[target], self.world_size);
@@ -713,6 +719,7 @@ impl Simulation {
         (BODY_BACK..=BODY_FRONT).contains(&forward) && lateral <= BODY_HALF_WIDTH
     }
 
+    #[inline]
     fn is_head_on(
         &self,
         attacker: usize,
@@ -726,11 +733,11 @@ impl Simulation {
             return false;
         }
 
-        let target_head_x = wrap(
+        let target_head_x = wrap_near(
             self.pos_x[target] + self.dir_x[target] * HEAD_OFFSET,
             self.world_size,
         );
-        let target_head_y = wrap(
+        let target_head_y = wrap_near(
             self.pos_y[target] + self.dir_y[target] * HEAD_OFFSET,
             self.world_size,
         );
@@ -804,8 +811,8 @@ impl Simulation {
                 let cell = self.wrapped_cell_index(cell_x, cell_y);
                 let mut cursor = self.grid_heads[cell];
 
-                while cursor >= 0 {
-                    let other = cursor as usize;
+                while cursor != EMPTY_GRID_INDEX {
+                    let other = cursor;
                     cursor = self.grid_next[other];
 
                     if let Some(distance_squared) = self.is_mate_eligible(index, other) {
@@ -823,6 +830,7 @@ impl Simulation {
 
     /// Returns the wrapped squared distance to `b` when `a` may currently mate with it:
     /// distinct agents, both old enough, nearly aligned, and within the mate radius.
+    #[inline]
     fn is_mate_eligible(&self, a: usize, b: usize) -> Option<f32> {
         if b == a || self.age[a] < MIN_MATE_AGE_SECONDS || self.age[b] < MIN_MATE_AGE_SECONDS {
             return None;
@@ -872,42 +880,34 @@ impl Simulation {
     }
 
     fn rebuild_grid(&mut self) {
-        self.grid_heads.fill(-1);
+        self.grid_heads.fill(EMPTY_GRID_INDEX);
 
         for index in 0..self.population {
             let cell = self.cell_index(self.pos_x[index], self.pos_y[index]);
             self.grid_next[index] = self.grid_heads[cell];
-            self.grid_heads[cell] = index as i32;
+            self.grid_heads[cell] = index;
         }
     }
 
-    fn refresh_render_agents(&mut self) {
-        let inv_world = 1.0 / self.world_size;
-        let inv_speed_range = 1.0 / (MAX_SPEED - MIN_SPEED);
-
-        for index in 0..self.population {
-            let base = index * RENDER_STRIDE_FLOATS;
-            self.render_agents[base] = self.pos_x[index] * inv_world;
-            self.render_agents[base + 1] = self.pos_y[index] * inv_world;
-            self.render_agents[base + 2] = self.dir_x[index];
-            self.render_agents[base + 3] = self.dir_y[index];
-            self.render_agents[base + 4] = self.color_r[index].clamp(0.0, 1.0);
-            self.render_agents[base + 5] = self.color_g[index].clamp(0.0, 1.0);
-            self.render_agents[base + 6] = self.color_b[index].clamp(0.0, 1.0);
-            self.render_agents[base + 7] =
-                ((self.speed[index] - MIN_SPEED) * inv_speed_range).clamp(0.0, 1.0);
-        }
-    }
-
+    #[inline]
     fn cell_index(&self, x: f32, y: f32) -> usize {
         self.wrapped_cell_index(self.cell_coord(x), self.cell_coord(y))
     }
 
+    #[inline]
     fn cell_coord(&self, value: f32) -> isize {
-        (value / GRID_CELL_SIZE).floor() as isize
+        (value * INV_GRID_CELL_SIZE) as isize
     }
 
+    #[inline]
     fn wrapped_cell_index(&self, cell_x: isize, cell_y: isize) -> usize {
+        if self.grid_cols.is_power_of_two() {
+            let mask = self.grid_cols - 1;
+            let x = cell_x as usize & mask;
+            let y = cell_y as usize & mask;
+            return y * self.grid_cols + x;
+        }
+
         let cols = self.grid_cols as isize;
         let x = cell_x.rem_euclid(cols) as usize;
         let y = cell_y.rem_euclid(cols) as usize;
@@ -1020,8 +1020,20 @@ fn fast_tanh(x: f32) -> f32 {
     (x * (27.0 + x2) / (27.0 + 9.0 * x2)).clamp(-1.0, 1.0)
 }
 
+#[cfg(test)]
 fn wrap(value: f32, world_size: f32) -> f32 {
     value.rem_euclid(world_size)
+}
+
+#[inline]
+fn wrap_near(value: f32, world_size: f32) -> f32 {
+    if value >= world_size {
+        value - world_size
+    } else if value < 0.0 {
+        value + world_size
+    } else {
+        value
+    }
 }
 
 fn wrap_delta(delta: f32, world_size: f32) -> f32 {
@@ -1191,10 +1203,19 @@ mod tests {
                 assert!((0.0..=1.0).contains(&c), "color out of range: {c}");
             }
             let speed_norm = sim.render_agents[base + 7];
-            assert!((0.0..=1.0).contains(&speed_norm), "speed_norm out of range: {speed_norm}");
+            assert!(
+                (0.0..=1.0).contains(&speed_norm),
+                "speed_norm out of range: {speed_norm}"
+            );
 
-            assert!((0.0..=sim.world_size).contains(&sim.pos_x[index]), "pos_x out of range");
-            assert!((0.0..=sim.world_size).contains(&sim.pos_y[index]), "pos_y out of range");
+            assert!(
+                (0.0..=sim.world_size).contains(&sim.pos_x[index]),
+                "pos_x out of range"
+            );
+            assert!(
+                (0.0..=sim.world_size).contains(&sim.pos_y[index]),
+                "pos_y out of range"
+            );
             assert!(
                 (MIN_SPEED..=MAX_SPEED).contains(&sim.speed[index]),
                 "speed out of range: {}",
@@ -1202,7 +1223,10 @@ mod tests {
             );
             let dir_len =
                 (sim.dir_x[index] * sim.dir_x[index] + sim.dir_y[index] * sim.dir_y[index]).sqrt();
-            assert!((dir_len - 1.0).abs() < 1e-3, "direction not unit length: {dir_len}");
+            assert!(
+                (dir_len - 1.0).abs() < 1e-3,
+                "direction not unit length: {dir_len}"
+            );
         }
     }
 
@@ -1229,7 +1253,10 @@ mod tests {
         assert_eq!(sanitize_population(1), 1);
         assert_eq!(sanitize_population(50), 50);
         assert_eq!(sanitize_population(MAX_POPULATION as u32), MAX_POPULATION);
-        assert_eq!(sanitize_population(MAX_POPULATION as u32 + 1), MAX_POPULATION);
+        assert_eq!(
+            sanitize_population(MAX_POPULATION as u32 + 1),
+            MAX_POPULATION
+        );
         assert_eq!(sanitize_population(u32::MAX), MAX_POPULATION);
     }
 
@@ -1307,7 +1334,10 @@ mod tests {
         let mut rng = SmallRng::new(321);
         for _ in 0..100_000 {
             let v = rng.next_signed_f32();
-            assert!((-1.0..1.0).contains(&v), "next_signed_f32 out of range: {v}");
+            assert!(
+                (-1.0..1.0).contains(&v),
+                "next_signed_f32 out of range: {v}"
+            );
         }
     }
 
@@ -1377,11 +1407,11 @@ mod tests {
             let x = i as f32 / 100.0;
             let fast = fast_tanh(x);
             let std = x.tanh();
+            assert!((fast - std).abs() < 0.025, "x={x}: fast={fast}, std={std}");
             assert!(
-                (fast - std).abs() < 0.025,
-                "x={x}: fast={fast}, std={std}"
+                (-1.0..=1.0).contains(&fast),
+                "fast_tanh out of range at x={x}"
             );
-            assert!((-1.0..=1.0).contains(&fast), "fast_tanh out of range at x={x}");
         }
     }
 
@@ -1389,6 +1419,7 @@ mod tests {
     fn shape_contracts_hold() {
         assert_eq!(RENDER_STRIDE_FLOATS, 8);
         assert_eq!(INPUT_COUNT, RAY_COUNT * RAY_INPUTS + SELF_INPUTS);
+        assert_eq!(RAY_SAMPLE_COUNT as f32 * RAY_SAMPLE_STEP, VISION_RANGE);
         assert_eq!(
             GENOME_LEN,
             HIDDEN_COUNT * (INPUT_COUNT + 1) + OUTPUT_COUNT * (HIDDEN_COUNT + 1)
@@ -1409,7 +1440,10 @@ mod tests {
         let start = 2 * GENOME_LEN;
         for i in 0..sim.genomes.len() {
             if (start..start + GENOME_LEN).contains(&i) {
-                assert!((-0.75..=0.75).contains(&sim.genomes[i]), "gene out of range");
+                assert!(
+                    (-0.75..=0.75).contains(&sim.genomes[i]),
+                    "gene out of range"
+                );
             } else {
                 assert_eq!(sim.genomes[i], 0.0, "neighbor slice mutated at {i}");
             }
@@ -1432,7 +1466,10 @@ mod tests {
         mutate_genome_with_rate(&mut genome, &mut rng, 1.0);
         for g in &genome {
             assert!((-GENE_LIMIT..=GENE_LIMIT).contains(g));
-            assert!(g.abs() <= MUTATION_MAGNITUDE + 1e-6, "change exceeded magnitude: {g}");
+            assert!(
+                g.abs() <= MUTATION_MAGNITUDE + 1e-6,
+                "change exceeded magnitude: {g}"
+            );
         }
     }
 
@@ -1505,7 +1542,10 @@ mod tests {
         }
 
         sim.evaluate_network(1, &inputs, &mut hidden, &mut outputs);
-        assert!(outputs.iter().any(|o| *o != 0.0), "nonzero genome must produce output");
+        assert!(
+            outputs.iter().any(|o| *o != 0.0),
+            "nonzero genome must produce output"
+        );
     }
 
     #[test]
@@ -1540,7 +1580,11 @@ mod tests {
         for ray in 0..RAY_COUNT {
             let base = ray * RAY_INPUTS;
             for k in 0..RAY_INPUTS {
-                assert_eq!(inputs[base + k], 0.0, "ray {ray} component {k} should be empty");
+                assert_eq!(
+                    inputs[base + k],
+                    0.0,
+                    "ray {ray} component {k} should be empty"
+                );
             }
         }
         let self_base = RAY_COUNT * RAY_INPUTS;
@@ -1594,7 +1638,10 @@ mod tests {
         assert!((inputs[base + 2] - 0.2).abs() < 1e-5);
         assert!((inputs[base + 3] - 0.4).abs() < 1e-5);
         assert!((inputs[base + 4] - 0.6).abs() < 1e-5);
-        assert!(inputs[base + 5].abs() < 1e-5, "aligned agent has zero relative heading");
+        assert!(
+            inputs[base + 5].abs() < 1e-5,
+            "aligned agent has zero relative heading"
+        );
     }
 
     #[test]
@@ -1631,7 +1678,11 @@ mod tests {
         sim.rebuild_grid();
         let mut inside = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inside);
-        assert_eq!(inside[RAY_COUNT / 2 * RAY_INPUTS], 1.0, "just inside lateral width");
+        assert_eq!(
+            inside[RAY_COUNT / 2 * RAY_INPUTS],
+            1.0,
+            "just inside lateral width"
+        );
 
         place(&mut sim, 1, 140.0, 112.0, 1.0, 0.0);
         sim.rebuild_grid();
@@ -1685,13 +1736,24 @@ mod tests {
         place(&mut sim, 0, 100.0, 100.0, 1.0, 0.0);
         let d = 40.0f32;
         // Ray 0 direction for a +x facing agent is (RAY_COS[0], RAY_SIN[0]).
-        place(&mut sim, 1, 100.0 + d * RAY_COS[0], 100.0 + d * RAY_SIN[0], 1.0, 0.0);
+        place(
+            &mut sim,
+            1,
+            100.0 + d * RAY_COS[0],
+            100.0 + d * RAY_SIN[0],
+            1.0,
+            0.0,
+        );
         sim.rebuild_grid();
 
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
         assert_eq!(inputs[0], 1.0, "target should register in ray 0");
-        assert_eq!(inputs[RAY_COUNT / 2 * RAY_INPUTS], 0.0, "center ray should stay empty");
+        assert_eq!(
+            inputs[RAY_COUNT / 2 * RAY_INPUTS],
+            0.0,
+            "center ray should stay empty"
+        );
     }
 
     #[test]
@@ -1742,7 +1804,10 @@ mod tests {
         let mut inputs = [0.0f32; INPUT_COUNT];
         sim.write_vision_inputs(0, &mut inputs);
         let last_ray = (RAY_COUNT - 1) * RAY_INPUTS;
-        assert_eq!(inputs[last_ray], 1.0, "+90 degree ray should see the left agent");
+        assert_eq!(
+            inputs[last_ray], 1.0,
+            "+90 degree ray should see the left agent"
+        );
         assert_eq!(inputs[0], 1.0, "-90 degree ray should see the right agent");
     }
 
@@ -1858,9 +1923,9 @@ mod tests {
         let cell_a = sim.cell_index(10.0, 10.0);
         let mut members = Vec::new();
         let mut cursor = sim.grid_heads[cell_a];
-        while cursor >= 0 {
-            members.push(cursor as usize);
-            cursor = sim.grid_next[cursor as usize];
+        while cursor != EMPTY_GRID_INDEX {
+            members.push(cursor);
+            cursor = sim.grid_next[cursor];
         }
         members.sort();
         assert_eq!(members, vec![0, 1]);
@@ -1878,7 +1943,7 @@ mod tests {
 
         place(&mut sim, 0, 200.0, 200.0, 1.0, 0.0);
         sim.rebuild_grid();
-        assert_eq!(sim.grid_heads[old_cell], -1);
+        assert_eq!(sim.grid_heads[old_cell], EMPTY_GRID_INDEX);
         let new_cell = sim.cell_index(200.0, 200.0);
         assert_eq!(sim.grid_heads[new_cell], 0);
     }
@@ -2068,7 +2133,10 @@ mod tests {
         sim.rebuild_grid();
         sim.update_breeding(dt);
         assert_eq!(sim.mate_partner[0], 1, "sticky: must keep current partner");
-        assert!((sim.mate_timer[0] - 2.0 * dt).abs() < 1e-6, "timer must keep growing");
+        assert!(
+            (sim.mate_timer[0] - 2.0 * dt).abs() < 1e-6,
+            "timer must keep growing"
+        );
     }
 
     #[test]
@@ -2210,7 +2278,11 @@ mod tests {
 
         let high = if sim.generation[0] == 1 { 0 } else { 1 };
         sim.reset_random_agent(high);
-        assert_eq!(sim.generation(), 0, "generation must reflect current max, not peak");
+        assert_eq!(
+            sim.generation(),
+            0,
+            "generation must reflect current max, not peak"
+        );
     }
 
     #[test]
@@ -2270,7 +2342,10 @@ mod tests {
             sim.tick(1.0 / 100.0);
         }
         let steps = sim.sim_steps();
-        assert!((59..=60).contains(&steps), "expected ~60 steps, got {steps}");
+        assert!(
+            (59..=60).contains(&steps),
+            "expected ~60 steps, got {steps}"
+        );
     }
 
     #[test]
@@ -2336,9 +2411,14 @@ mod tests {
     }
 
     #[test]
-    fn advance_steps_refreshes_render_after_batch() {
+    fn advance_steps_leaves_render_dirty_until_refreshed() {
         let mut sim = Simulation::new(256.0, 4, 1);
+        let before_render = sim.render_agents.clone();
+
         sim.advance_steps(3);
+        assert_eq!(sim.render_agents, before_render);
+
+        sim.refresh_render_agents();
         for i in 0..4 {
             let base = i * RENDER_STRIDE_FLOATS;
             let expected_x = sim.pos_x[i] / sim.world_size;
