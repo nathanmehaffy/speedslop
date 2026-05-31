@@ -1,5 +1,8 @@
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::*;
+
 const DEFAULT_WORLD_SIZE: f32 = 4096.0;
 const DEFAULT_POPULATION: usize = 10_000;
 const MAX_POPULATION: usize = 100_000;
@@ -255,7 +258,6 @@ impl Simulation {
         self.apply_decisions(dt);
         self.rebuild_grid();
         self.resolve_collisions();
-        self.rebuild_grid();
         self.update_breeding(dt);
         self.steps = self.steps.wrapping_add(1);
     }
@@ -407,76 +409,20 @@ impl Simulation {
         let origin_y = self.pos_y[index];
         let dir_x = self.dir_x[index];
         let dir_y = self.dir_y[index];
-        let mut ray_dir_x = [0.0; RAY_COUNT];
-        let mut ray_dir_y = [0.0; RAY_COUNT];
-        let mut ray_distance = [VISION_RANGE; RAY_COUNT];
-        let mut ray_color = [[0.0; 3]; RAY_COUNT];
 
         for ray in 0..RAY_COUNT {
-            ray_dir_x[ray] = dir_x * RAY_COS[ray] - dir_y * RAY_SIN[ray];
-            ray_dir_y[ray] = dir_x * RAY_SIN[ray] + dir_y * RAY_COS[ray];
-        }
+            let ray_dx = dir_x * RAY_COS[ray] - dir_y * RAY_SIN[ray];
+            let ray_dy = dir_x * RAY_SIN[ray] + dir_y * RAY_COS[ray];
 
-        for ray in 0..RAY_COUNT {
-            let mut sample_distance = RAY_SAMPLE_STEP;
-            let mut previous_cell = usize::MAX;
+            let (distance, r, g, b) = self.cast_ray(index, origin_x, origin_y, ray_dx, ray_dy);
 
-            while sample_distance <= VISION_RANGE {
-                let sample_x = wrap(origin_x + ray_dir_x[ray] * sample_distance, self.world_size);
-                let sample_y = wrap(origin_y + ray_dir_y[ray] * sample_distance, self.world_size);
-                let cell = self.cell_index(sample_x, sample_y);
-
-                if cell == previous_cell {
-                    sample_distance += RAY_SAMPLE_STEP;
-                    continue;
-                }
-
-                previous_cell = cell;
-                let mut cursor = self.grid_heads[cell];
-
-                while cursor >= 0 {
-                    let other = cursor as usize;
-                    cursor = self.grid_next[other];
-
-                    if other == index {
-                        continue;
-                    }
-
-                    let dx = wrap_delta(self.pos_x[other] - origin_x, self.world_size);
-                    let dy = wrap_delta(self.pos_y[other] - origin_y, self.world_size);
-                    let forward = dx * ray_dir_x[ray] + dy * ray_dir_y[ray];
-                    if forward <= 0.0 || forward > VISION_RANGE || forward >= ray_distance[ray] {
-                        continue;
-                    }
-
-                    let lateral = (dx * -ray_dir_y[ray] + dy * ray_dir_x[ray]).abs();
-                    let width = RAY_HALF_WIDTH + forward * RAY_FORWARD_SLOP;
-                    if lateral <= width {
-                        ray_distance[ray] = forward;
-                        ray_color[ray] = [
-                            self.color_r[other],
-                            self.color_g[other],
-                            self.color_b[other],
-                        ];
-                    }
-                }
-
-                if ray_distance[ray] < VISION_RANGE {
-                    break;
-                }
-
-                sample_distance += RAY_SAMPLE_STEP;
-            }
-        }
-
-        for ray in 0..RAY_COUNT {
-            let base = ray * 5;
-            if ray_distance[ray] < VISION_RANGE {
+            if distance < VISION_RANGE {
+                let base = ray * 5;
                 inputs[base] = 1.0;
-                inputs[base + 1] = 1.0 - ray_distance[ray] / VISION_RANGE;
-                inputs[base + 2] = ray_color[ray][0];
-                inputs[base + 3] = ray_color[ray][1];
-                inputs[base + 4] = ray_color[ray][2];
+                inputs[base + 1] = 1.0 - distance / VISION_RANGE;
+                inputs[base + 2] = r;
+                inputs[base + 3] = g;
+                inputs[base + 4] = b;
             }
         }
 
@@ -486,7 +432,90 @@ impl Simulation {
         inputs[self_base + 1] = (self.age[index] / AGE_INPUT_CAP_SECONDS).clamp(0.0, 1.0);
     }
 
+    fn cast_ray(
+        &self,
+        index: usize,
+        origin_x: f32,
+        origin_y: f32,
+        ray_dx: f32,
+        ray_dy: f32,
+    ) -> (f32, f32, f32, f32) {
+        let mut hit_distance = VISION_RANGE;
+        let mut hit_r = 0.0;
+        let mut hit_g = 0.0;
+        let mut hit_b = 0.0;
+
+        let mut sample_distance = RAY_SAMPLE_STEP;
+        let mut previous_cell = usize::MAX;
+
+        while sample_distance <= VISION_RANGE {
+            let sample_x = wrap(origin_x + ray_dx * sample_distance, self.world_size);
+            let sample_y = wrap(origin_y + ray_dy * sample_distance, self.world_size);
+            let cell = self.cell_index(sample_x, sample_y);
+
+            if cell == previous_cell {
+                sample_distance += RAY_SAMPLE_STEP;
+                continue;
+            }
+
+            previous_cell = cell;
+            let mut cursor = self.grid_heads[cell];
+
+            while cursor >= 0 {
+                let other = cursor as usize;
+                cursor = self.grid_next[other];
+
+                if other == index {
+                    continue;
+                }
+
+                let dx = wrap_delta(self.pos_x[other] - origin_x, self.world_size);
+                let dy = wrap_delta(self.pos_y[other] - origin_y, self.world_size);
+                let forward = dx * ray_dx + dy * ray_dy;
+                if forward <= 0.0 || forward > VISION_RANGE || forward >= hit_distance {
+                    continue;
+                }
+
+                let lateral = (dx * -ray_dy + dy * ray_dx).abs();
+                let width = RAY_HALF_WIDTH + forward * RAY_FORWARD_SLOP;
+                if lateral <= width {
+                    hit_distance = forward;
+                    hit_r = self.color_r[other];
+                    hit_g = self.color_g[other];
+                    hit_b = self.color_b[other];
+                }
+            }
+
+            if hit_distance < VISION_RANGE {
+                break;
+            }
+
+            sample_distance += RAY_SAMPLE_STEP;
+        }
+
+        (hit_distance, hit_r, hit_g, hit_b)
+    }
+
     fn evaluate_network(
+        &self,
+        index: usize,
+        inputs: &[f32; INPUT_COUNT],
+        hidden: &mut [f32; HIDDEN_COUNT],
+        outputs: &mut [f32; OUTPUT_COUNT],
+    ) {
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        unsafe {
+            self.evaluate_network_simd(index, inputs, hidden, outputs);
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+        {
+            self.evaluate_network_scalar(index, inputs, hidden, outputs);
+        }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    fn evaluate_network_scalar(
         &self,
         index: usize,
         inputs: &[f32; INPUT_COUNT],
@@ -503,7 +532,7 @@ impl Simulation {
             }
             sum += self.genomes[cursor];
             cursor += 1;
-            *hidden_value = sum.tanh();
+            *hidden_value = fast_tanh(sum);
         }
 
         for output in outputs.iter_mut() {
@@ -514,7 +543,82 @@ impl Simulation {
             }
             sum += self.genomes[cursor];
             cursor += 1;
-            *output = sum.tanh();
+            *output = fast_tanh(sum);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe fn evaluate_network_simd(
+        &self,
+        index: usize,
+        inputs: &[f32; INPUT_COUNT],
+        hidden: &mut [f32; HIDDEN_COUNT],
+        outputs: &mut [f32; OUTPUT_COUNT],
+    ) {
+        let genome_base = index * GENOME_LEN;
+
+        for h in 0..HIDDEN_COUNT {
+            let weight_base = genome_base + h * (INPUT_COUNT + 1);
+            let mut sum = f32x4_splat(0.0);
+
+            let mut i = 0;
+            while i + 4 <= INPUT_COUNT {
+                let inp = f32x4(inputs[i], inputs[i + 1], inputs[i + 2], inputs[i + 3]);
+                let wgt = f32x4(
+                    self.genomes[weight_base + i],
+                    self.genomes[weight_base + i + 1],
+                    self.genomes[weight_base + i + 2],
+                    self.genomes[weight_base + i + 3],
+                );
+                sum = f32x4_add(sum, f32x4_mul(inp, wgt));
+                i += 4;
+            }
+
+            let mut scalar_sum = f32x4_extract_lane::<0>(sum)
+                + f32x4_extract_lane::<1>(sum)
+                + f32x4_extract_lane::<2>(sum)
+                + f32x4_extract_lane::<3>(sum);
+
+            while i < INPUT_COUNT {
+                scalar_sum += inputs[i] * self.genomes[weight_base + i];
+                i += 1;
+            }
+            scalar_sum += self.genomes[weight_base + INPUT_COUNT];
+
+            hidden[h] = fast_tanh(scalar_sum);
+        }
+
+        let output_base = genome_base + HIDDEN_COUNT * (INPUT_COUNT + 1);
+
+        for o in 0..OUTPUT_COUNT {
+            let weight_base = output_base + o * (HIDDEN_COUNT + 1);
+            let mut sum = f32x4_splat(0.0);
+
+            let mut i = 0;
+            while i + 4 <= HIDDEN_COUNT {
+                let hid = f32x4(hidden[i], hidden[i + 1], hidden[i + 2], hidden[i + 3]);
+                let wgt = f32x4(
+                    self.genomes[weight_base + i],
+                    self.genomes[weight_base + i + 1],
+                    self.genomes[weight_base + i + 2],
+                    self.genomes[weight_base + i + 3],
+                );
+                sum = f32x4_add(sum, f32x4_mul(hid, wgt));
+                i += 4;
+            }
+
+            let mut scalar_sum = f32x4_extract_lane::<0>(sum)
+                + f32x4_extract_lane::<1>(sum)
+                + f32x4_extract_lane::<2>(sum)
+                + f32x4_extract_lane::<3>(sum);
+
+            while i < HIDDEN_COUNT {
+                scalar_sum += hidden[i] * self.genomes[weight_base + i];
+                i += 1;
+            }
+            scalar_sum += self.genomes[weight_base + HIDDEN_COUNT];
+
+            outputs[o] = fast_tanh(scalar_sum);
         }
     }
 
@@ -842,6 +946,18 @@ fn mutate_genome_with_rate(genome: &mut [f32], rng: &mut SmallRng, mutation_rate
                 (*gene + rng.next_signed_f32() * MUTATION_MAGNITUDE).clamp(-GENE_LIMIT, GENE_LIMIT);
         }
     }
+}
+
+#[inline]
+fn fast_tanh(x: f32) -> f32 {
+    if x < -3.0 {
+        return -1.0;
+    }
+    if x > 3.0 {
+        return 1.0;
+    }
+    let x2 = x * x;
+    (x * (27.0 + x2) / (27.0 + 9.0 * x2)).clamp(-1.0, 1.0)
 }
 
 fn wrap(value: f32, world_size: f32) -> f32 {
@@ -1192,6 +1308,20 @@ mod tests {
     }
 
     #[test]
+    fn fast_tanh_matches_std_tanh_within_tolerance() {
+        for i in -400..=400 {
+            let x = i as f32 / 100.0;
+            let fast = fast_tanh(x);
+            let std = x.tanh();
+            assert!(
+                (fast - std).abs() < 0.025,
+                "x={x}: fast={fast}, std={std}"
+            );
+            assert!((-1.0..=1.0).contains(&fast), "fast_tanh out of range at x={x}");
+        }
+    }
+
+    #[test]
     fn shape_contracts_hold() {
         assert_eq!(RENDER_STRIDE_FLOATS, 8);
         assert_eq!(INPUT_COUNT, RAY_COUNT * 5 + 2);
@@ -1282,11 +1412,11 @@ mod tests {
         let mut outputs = [0.0; OUTPUT_COUNT];
         sim.evaluate_network(0, &inputs, &mut hidden, &mut outputs);
 
-        let expected_hidden = hidden_bias.tanh();
+        let expected_hidden = fast_tanh(hidden_bias);
         for h in &hidden {
             assert!((h - expected_hidden).abs() < 1e-6);
         }
-        let expected_output = output_bias.tanh();
+        let expected_output = fast_tanh(output_bias);
         for o in &outputs {
             assert!((o - expected_output).abs() < 1e-6);
         }
