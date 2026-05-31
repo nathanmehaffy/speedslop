@@ -1,0 +1,18 @@
+{
+  "name": "speedslop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "wasm-pack build sim --target web",
+    "dev": "npm run build:wasm && vite --host 127.0.0.1",
+    "build": "npm run build:wasm && tsc --noEmit && vite build",
+    "check": "npm run build:wasm && tsc --noEmit && cargo check --manifest-path sim/Cargo.toml --target wasm32-unknown-unknown",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.60",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
