@@ -142,8 +142,20 @@ async function main(): Promise<void> {
   resizeObserver.observe(canvas);
 
   const start = performance.now();
+  const fpsElement = document.querySelector<HTMLElement>("#fps-monitor");
+  let fpsFrameCount = 0;
+  let fpsLastSample = performance.now();
 
-  function frame(): void {
+  function frame(timestamp: number): void {
+    fpsFrameCount += 1;
+    const fpsElapsed = timestamp - fpsLastSample;
+    if (fpsElapsed >= 500 && fpsElement) {
+      const fps = Math.round((fpsFrameCount * 1000) / fpsElapsed);
+      fpsElement.textContent = `${fps} FPS`;
+      fpsFrameCount = 0;
+      fpsLastSample = timestamp;
+    }
+
     size = resizeCanvas(canvas);
     const aspect = size.width / size.height;
     const time = (performance.now() - start) * 0.001;
