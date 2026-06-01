@@ -77,7 +77,11 @@ select {
 }
 
 #status {
+  min-width: 0;
+  max-width: 100%;
   color: #fffaf0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 #fps {

@@ -1,37 +1,55 @@
 # SpeedSlop
 
-SpeedSlop is a browser-based evolutionary simulation. A Rust simulation core owns the
-agent state, compiles to WebAssembly, and runs in a web worker. The TypeScript frontend
-streams packed agent snapshots to WebGPU and renders the population as instanced
-triangles with a small HUD for speed, reset, camera, and stats.
+SpeedSlop is a browser-based evolutionary simulation. The simulation and renderer
+both run on WebGPU: agent state, neural genomes, the spatial grid, fixed-step
+updates, interaction rules, aggregate stats, and instanced rendering stay resident
+on one `GPUDevice`.
 
-The current simulation keeps 10,000 neural agents in a constant-size toroidal world.
+The default simulation keeps 10,000 neural agents in a constant-size toroidal world.
 Agents sense neighbors with nine rays, steer with a tiny neural network, breed by
 proximity and alignment, die on side/body collisions after a short grace period, and
 are immediately replaced so the population never changes.
 
 ## Setup
 
-Install Node.js, Rust, `wasm-pack`, and the `wasm32-unknown-unknown` target:
+Install Node.js and dependencies:
 
 ```powershell
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack
 npm install
 ```
 
 ## Commands
 
 ```powershell
-npm run dev      # build WASM and start Vite on 127.0.0.1
-npm run build    # build WASM, type-check, and bundle production assets
-npm run check    # build WASM, type-check, and cargo-check the WASM target
-npm run bench    # run the worker-oriented simulation benchmark
-cargo test --manifest-path sim/Cargo.toml
+npm run dev      # start Vite on 127.0.0.1
+npm run build    # type-check and bundle production assets
+npm run check    # run helper tests and type-check TypeScript
+npm run bench    # open the app in GPU benchmark mode
 ```
 
-The Rust render buffer layout is eight `f32` values per agent:
+Benchmark mode is also available manually at `/?bench=1`. It runs the GPU simulation
+at max speed and reports aggregate GPU steps/s in the HUD without reading agent data
+back to the CPU.
 
-```text
-[x_norm, y_norm, dir_x, dir_y, r, g, b, speed_norm]
-```
+GPU self-check mode is available at `/?selfcheck=1`. It runs small debug simulations
+with explicit tiny readbacks before starting the normal app.
+
+## Architecture
+
+- `src/main.ts`: Browser entrypoint. Creates WebGPU, handles HUD controls and camera
+  input, schedules fixed simulation steps, and records render passes.
+- `src/gpu-simulation.ts`: GPU simulation engine. Owns all simulation buffers,
+  compute pipelines, render pipelines, reset logic, stepping, tiny stats readback,
+  and destruction.
+- `src/simulation-helpers.ts`: Shared constants, helper math, fixed-step scheduling,
+  and public stats types.
+- `src/simulation-helpers.test.ts`: Node-run TypeScript tests for deterministic helper
+  contracts.
+- `src/gpu-self-check.ts`: Browser-run GPU self-check scenarios for small scripted
+  simulations.
+- `src/style.css`: Fullscreen canvas and compact HUD styling.
+
+The spatial grid is a full linked-cell grid: every agent is inserted exactly once,
+with no fixed bucket cap and no per-frame prefix scan. The normal frame path performs
+no per-agent CPU transfer. The CPU writes small control uniforms, submits compute/render
+commands, and reads a tiny stats buffer a few times per second for the HUD.

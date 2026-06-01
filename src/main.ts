@@ -1,52 +1,43 @@
 import "./style.css";
-import type {
-  MainToWorkerMessage,
+import { GpuSimulation } from "./gpu-simulation";
+import { runGpuSelfCheck } from "./gpu-self-check";
+import {
+  CameraState,
+  DEFAULT_POPULATION,
+  DEFAULT_WORLD_SIZE,
+  FIXED_STEP_SECONDS,
+  INITIAL_SEED,
+  MAX_MODE_STEPS_PER_FRAME,
   SimRate,
   SimulationStats,
-  WorkerSnapshotMessage,
-  WorkerToMainMessage,
-} from "./simulation-messages";
+  normalizeSimRate,
+  stepsDueForFrame,
+  wrapUnit,
+} from "./simulation-helpers";
 
-const WORLD_SIZE = 8192;
-const POPULATION = 10_000;
-const INITIAL_SEED = 1;
-const SNAPSHOT_BUFFER_COUNT = 4;
-const ARROW_LENGTH_WORLD_UNITS = 18;
-const ARROW_LOCAL_LENGTH = 2.2;
-// Half-size of the elder glow quad, expressed in the same local units as the agent triangle.
-const GLOW_RADIUS_LOCAL = 6.0;
-const NO_HIGHLIGHT = -1;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 64;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
-const GRID_CELLS_PER_WORLD = 8;
-const TILE_GRID_WIDTH = 5;
-const TILE_COPY_COUNT = TILE_GRID_WIDTH * TILE_GRID_WIDTH;
+const STATS_INTERVAL_MS = 500;
+const DISPLAY_MODE_MAX_EXTRA_STEPS_PER_FRAME = MAX_MODE_STEPS_PER_FRAME - 1;
+const DISPLAY_MODE_P_GAIN = 0.08;
+const DISPLAY_MODE_EXTRA_STEP_DELTA_LIMIT = 0.35;
+const DISPLAY_MODE_FPS_HEADROOM = 0.985;
+const DISPLAY_MODE_FPS_EMA_ALPHA = 0.22;
+const DISPLAY_MODE_ERROR_DEADBAND_FPS = 1.0;
 
 type WebGpuState = {
   adapter: GPUAdapter;
+  adapterLabel: string;
   device: GPUDevice;
   context: GPUCanvasContext;
-  agentBuffer: GPUBuffer;
-  viewBuffer: GPUBuffer;
-  bindGroup: GPUBindGroup;
-  gridBindGroup: GPUBindGroup;
-  glowBindGroup: GPUBindGroup;
-  pipeline: GPURenderPipeline;
-  gridPipeline: GPURenderPipeline;
-  glowPipeline: GPURenderPipeline;
   format: GPUTextureFormat;
+  simulation: GpuSimulation;
 };
 
 type FpsState = {
   frames: number;
   last: number;
-};
-
-type CameraState = {
-  centerX: number;
-  centerY: number;
-  zoom: number;
 };
 
 type PointerPoint = {
@@ -89,9 +80,9 @@ const resetViewButton = queryRequired<HTMLButtonElement>("#reset-view");
 const seedInput = queryRequired<HTMLInputElement>("#seed");
 const speedSelect = queryRequired<HTMLSelectElement>("#speed");
 const renderFpsSelect = queryRequired<HTMLSelectElement>("#render-fps");
-
-// Index of the agent to render with the elder glow, or NO_HIGHLIGHT for none. Updated per snapshot.
-let highlightAgentIndex = NO_HIGHLIGHT;
+const searchParams = new URLSearchParams(window.location.search);
+const benchmarkMode = searchParams.has("bench");
+const selfCheckMode = searchParams.has("selfcheck");
 
 function setStatus(message: string): void {
   statusEl.textContent = message;
@@ -111,6 +102,10 @@ function resizeCanvasToDisplaySize(): boolean {
   return false;
 }
 
+function canvasAspect(): number {
+  return canvas.height > 0 ? canvas.width / canvas.height : 1;
+}
+
 function createDefaultCamera(): CameraState {
   return { centerX: 0.5, centerY: 0.5, zoom: MIN_ZOOM };
 }
@@ -121,16 +116,8 @@ function resetCamera(camera: CameraState): void {
   camera.zoom = MIN_ZOOM;
 }
 
-function wrapUnit(value: number): number {
-  return value - Math.floor(value);
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function canvasAspect(): number {
-  return canvas.height > 0 ? canvas.width / canvas.height : 1;
 }
 
 function clientOffsetToWorldDelta(camera: CameraState, clientX: number, clientY: number): Vec2 {
@@ -207,7 +194,7 @@ function readPointerGesture(pointers: Map<number, PointerPoint>): PointerGesture
   };
 }
 
-async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuState> {
+async function createWebGpuState(seed: number): Promise<WebGpuState> {
   if (!navigator.gpu) {
     throw new Error("WebGPU is not available in this browser.");
   }
@@ -220,7 +207,14 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     throw new Error("No compatible WebGPU adapter was found.");
   }
 
+  const adapterLabel = describeAdapter(adapter);
   const device = await adapter.requestDevice();
+  device.addEventListener("uncapturederror", (event) => {
+    const message = event.error.message || "Uncaptured WebGPU error";
+    setStatus(message);
+    console.error(event.error);
+  });
+
   const context = canvas.getContext("webgpu");
 
   if (!context) {
@@ -234,410 +228,38 @@ async function createWebGpuState(agentBufferByteSize: number): Promise<WebGpuSta
     alphaMode: "opaque",
   });
 
-  const agentBuffer = device.createBuffer({
-    label: "agent-render-buffer",
-    size: Math.max(4, agentBufferByteSize),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-
-  const viewBuffer = device.createBuffer({
-    label: "view-uniform-buffer",
-    size: 32,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-
-  const shader = device.createShaderModule({
-    label: "agent-instancing-shader",
-    code: `
-      struct View {
-        aspect: f32,
-        arrow_scale: f32,
-        camera_x: f32,
-        camera_y: f32,
-        zoom: f32,
-        highlight_index: f32,
-        _pad1: f32,
-        _pad2: f32,
-      };
-
-      struct VertexOutput {
-        @builtin(position) position: vec4f,
-        @location(0) color: vec4f,
-      };
-
-      @group(0) @binding(0) var<storage, read> agents: array<vec4f>;
-      @group(0) @binding(1) var<uniform> view: View;
-
-      fn delta_to_clip(delta: vec2f) -> vec2f {
-        let centered = delta * (2.0 * view.zoom);
-        if (view.aspect > 1.0) {
-          return vec2f(centered.x / view.aspect, -centered.y);
-        }
-
-        return vec2f(centered.x, -centered.y * view.aspect);
-      }
-
-      @vertex
-      fn vertex_main(
-        @builtin(vertex_index) vertex_index: u32,
-        @builtin(instance_index) instance_index: u32,
-      ) -> VertexOutput {
-        let agent_index = instance_index / ${TILE_COPY_COUNT}u;
-        let tile_index = instance_index % ${TILE_COPY_COUNT}u;
-        let tile_x = i32(tile_index % ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
-        let tile_y = i32(tile_index / ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
-        let tile_offset = vec2f(f32(tile_x), f32(tile_y));
-        let base = agent_index * 2u;
-        let pose = agents[base];
-        let appearance = agents[base + 1u];
-
-        var local = vec2f(0.0, 0.0);
-        if (vertex_index == 0u) {
-          local = vec2f(1.35, 0.0);
-        } else if (vertex_index == 1u) {
-          local = vec2f(-0.85, -0.48);
-        } else {
-          local = vec2f(-0.85, 0.48);
-        }
-
-        let is_highlight =
-          view.highlight_index >= 0.0 && agent_index == u32(view.highlight_index);
-        let size_scale = select(1.0, 1.35, is_highlight);
-        let brightness = select(1.0, 1.7, is_highlight);
-
-        let direction = normalize(pose.zw);
-        let side = vec2f(-direction.y, direction.x);
-        let agent_delta = pose.xy + tile_offset - vec2f(view.camera_x, view.camera_y);
-        let world_delta =
-          agent_delta + (direction * local.x + side * local.y) * view.arrow_scale * size_scale;
-        let speed_glow = 0.65 + appearance.a * 0.35;
-
-        var output: VertexOutput;
-        output.position = vec4f(delta_to_clip(world_delta), 0.0, 1.0);
-        output.color = vec4f(min(appearance.rgb * speed_glow * brightness, vec3f(1.0)), 1.0);
-        return output;
-      }
-
-      @fragment
-      fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
-        return input.color;
-      }
-    `,
-  });
-
-  const gridShader = device.createShaderModule({
-    label: "world-grid-shader",
-    code: `
-      struct View {
-        aspect: f32,
-        arrow_scale: f32,
-        camera_x: f32,
-        camera_y: f32,
-        zoom: f32,
-        highlight_index: f32,
-        _pad1: f32,
-        _pad2: f32,
-      };
-
-      struct VertexOutput {
-        @builtin(position) position: vec4f,
-        @location(0) clip_position: vec2f,
-      };
-
-      @group(0) @binding(0) var<uniform> view: View;
-
-      fn clip_to_world_delta(clip_position: vec2f) -> vec2f {
-        let zoom_scale = 2.0 * view.zoom;
-        if (view.aspect > 1.0) {
-          return vec2f(
-            clip_position.x * view.aspect / zoom_scale,
-            -clip_position.y / zoom_scale,
-          );
-        }
-
-        return vec2f(
-          clip_position.x / zoom_scale,
-          -clip_position.y / (view.aspect * zoom_scale),
-        );
-      }
-
-      fn line_alpha(value: f32, spacing: f32, width_pixels: f32) -> f32 {
-        let scaled = value / spacing;
-        let dist = abs(fract(scaled + 0.5) - 0.5);
-        let pixel = max(fwidth(scaled), 0.000001);
-        return 1.0 - smoothstep(pixel * width_pixels, pixel * (width_pixels + 1.0), dist);
-      }
-
-      @vertex
-      fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-        var position = vec2f(-1.0, -1.0);
-        if (vertex_index == 1u) {
-          position = vec2f(3.0, -1.0);
-        } else if (vertex_index == 2u) {
-          position = vec2f(-1.0, 3.0);
-        }
-
-        var output: VertexOutput;
-        output.position = vec4f(position, 0.0, 1.0);
-        output.clip_position = position;
-        return output;
-      }
-
-      @fragment
-      fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
-        let world =
-          vec2f(view.camera_x, view.camera_y) + clip_to_world_delta(input.clip_position);
-        let minor_spacing = 1.0 / ${GRID_CELLS_PER_WORLD.toFixed(1)};
-        let minor = max(
-          line_alpha(world.x, minor_spacing, 0.42),
-          line_alpha(world.y, minor_spacing, 0.42),
-        );
-        let boundary = max(
-          line_alpha(world.x, 1.0, 1.15),
-          line_alpha(world.y, 1.0, 1.15),
-        );
-        let color =
-          vec3f(0.10, 0.18, 0.20) * minor +
-          vec3f(0.58, 0.78, 0.72) * boundary;
-        let alpha = min(0.55, minor * 0.18 + boundary * 0.48);
-
-        return vec4f(color, alpha);
-      }
-    `,
-  });
-
-  const glowShader = device.createShaderModule({
-    label: "elder-glow-shader",
-    code: `
-      struct View {
-        aspect: f32,
-        arrow_scale: f32,
-        camera_x: f32,
-        camera_y: f32,
-        zoom: f32,
-        highlight_index: f32,
-        _pad1: f32,
-        _pad2: f32,
-      };
-
-      struct VertexOutput {
-        @builtin(position) position: vec4f,
-        @location(0) local: vec2f,
-      };
-
-      @group(0) @binding(0) var<storage, read> agents: array<vec4f>;
-      @group(0) @binding(1) var<uniform> view: View;
-
-      fn delta_to_clip(delta: vec2f) -> vec2f {
-        let centered = delta * (2.0 * view.zoom);
-        if (view.aspect > 1.0) {
-          return vec2f(centered.x / view.aspect, -centered.y);
-        }
-
-        return vec2f(centered.x, -centered.y * view.aspect);
-      }
-
-      @vertex
-      fn vertex_main(
-        @builtin(vertex_index) vertex_index: u32,
-        @builtin(instance_index) instance_index: u32,
-      ) -> VertexOutput {
-        let tile_x = i32(instance_index % ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
-        let tile_y = i32(instance_index / ${TILE_GRID_WIDTH}u) - ${Math.floor(TILE_GRID_WIDTH / 2)};
-        let tile_offset = vec2f(f32(tile_x), f32(tile_y));
-
-        let base = u32(view.highlight_index) * 2u;
-        let pose = agents[base];
-
-        var corners = array<vec2f, 6>(
-          vec2f(-1.0, -1.0),
-          vec2f(1.0, -1.0),
-          vec2f(-1.0, 1.0),
-          vec2f(-1.0, 1.0),
-          vec2f(1.0, -1.0),
-          vec2f(1.0, 1.0),
-        );
-        let local = corners[vertex_index];
-        let glow_radius = view.arrow_scale * ${GLOW_RADIUS_LOCAL.toFixed(1)};
-        let agent_delta = pose.xy + tile_offset - vec2f(view.camera_x, view.camera_y);
-        let world_delta = agent_delta + local * glow_radius;
-
-        var output: VertexOutput;
-        output.position = vec4f(delta_to_clip(world_delta), 0.0, 1.0);
-        output.local = local;
-        return output;
-      }
-
-      @fragment
-      fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
-        let dist = length(input.local);
-        let falloff = pow(clamp(1.0 - dist, 0.0, 1.0), 2.0);
-        let color = vec3f(1.0, 0.86, 0.45);
-        return vec4f(color * falloff, falloff);
-      }
-    `,
-  });
-
-  const pipeline = device.createRenderPipeline({
-    label: "agent-instancing-pipeline",
-    layout: "auto",
-    vertex: {
-      module: shader,
-      entryPoint: "vertex_main",
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "fragment_main",
-      targets: [
-        {
-          format,
-          blend: {
-            color: {
-              srcFactor: "src-alpha",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-          },
-        },
-      ],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const gridPipeline = device.createRenderPipeline({
-    label: "world-grid-pipeline",
-    layout: "auto",
-    vertex: {
-      module: gridShader,
-      entryPoint: "vertex_main",
-    },
-    fragment: {
-      module: gridShader,
-      entryPoint: "fragment_main",
-      targets: [
-        {
-          format,
-          blend: {
-            color: {
-              srcFactor: "src-alpha",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-          },
-        },
-      ],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const glowPipeline = device.createRenderPipeline({
-    label: "elder-glow-pipeline",
-    layout: "auto",
-    vertex: {
-      module: glowShader,
-      entryPoint: "vertex_main",
-    },
-    fragment: {
-      module: glowShader,
-      entryPoint: "fragment_main",
-      targets: [
-        {
-          format,
-          blend: {
-            color: {
-              srcFactor: "one",
-              dstFactor: "one",
-              operation: "add",
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one",
-              operation: "add",
-            },
-          },
-        },
-      ],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const bindGroup = device.createBindGroup({
-    label: "agent-instancing-bind-group",
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: agentBuffer } },
-      { binding: 1, resource: { buffer: viewBuffer } },
-    ],
-  });
-
-  const glowBindGroup = device.createBindGroup({
-    label: "elder-glow-bind-group",
-    layout: glowPipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: agentBuffer } },
-      { binding: 1, resource: { buffer: viewBuffer } },
-    ],
-  });
-
-  const gridBindGroup = device.createBindGroup({
-    label: "world-grid-bind-group",
-    layout: gridPipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: viewBuffer } }],
-  });
-
-  return {
-    adapter,
-    device,
-    context,
-    agentBuffer,
-    viewBuffer,
-    bindGroup,
-    gridBindGroup,
-    glowBindGroup,
-    pipeline,
-    gridPipeline,
-    glowPipeline,
+  const simulation = await GpuSimulation.create(device, {
+    worldSize: DEFAULT_WORLD_SIZE,
+    population: DEFAULT_POPULATION,
+    seed,
     format,
+  });
+
+  return { adapter, adapterLabel, device, context, format, simulation };
+}
+
+function describeAdapter(adapter: GPUAdapter): string {
+  const info = adapter.info as GPUAdapterInfo & {
+    architecture?: string;
+    description?: string;
+    device?: string;
+    powerPreference?: string;
+    type?: string;
+    vendor?: string;
   };
+  const details = [
+    info.description,
+    info.vendor,
+    info.architecture,
+    info.device,
+    info.type,
+    info.powerPreference,
+  ].filter((value): value is string => Boolean(value && value.trim()));
+
+  return details.length > 0 ? details.join(" / ") : "WebGPU";
 }
 
-function uploadSnapshot(gpu: WebGpuState, snapshot: WorkerSnapshotMessage): void {
-  gpu.device.queue.writeBuffer(gpu.agentBuffer, 0, new Float32Array(snapshot.buffer));
-}
-
-function updateViewUniform(gpu: WebGpuState, camera: CameraState): void {
-  const aspect = canvasAspect();
-  const arrowScale = ARROW_LENGTH_WORLD_UNITS / ARROW_LOCAL_LENGTH / WORLD_SIZE;
-  const uniform = new Float32Array([
-    aspect,
-    arrowScale,
-    camera.centerX,
-    camera.centerY,
-    camera.zoom,
-    highlightAgentIndex,
-    0,
-    0,
-  ]);
-  gpu.device.queue.writeBuffer(gpu.viewBuffer, 0, uniform);
-}
-
-function setUpCameraControls(gpu: WebGpuState, camera: CameraState): void {
+function setUpCameraControls(camera: CameraState): void {
   const pointers = new Map<number, PointerPoint>();
 
   const applyGesture = (before: PointerGesture | null, after: PointerGesture | null): void => {
@@ -659,7 +281,6 @@ function setUpCameraControls(gpu: WebGpuState, camera: CameraState): void {
       after.centerY,
       nextZoom,
     );
-    updateViewUniform(gpu, camera);
   };
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -725,28 +346,36 @@ function setUpCameraControls(gpu: WebGpuState, camera: CameraState): void {
         event.clientY,
         nextZoom,
       );
-      updateViewUniform(gpu, camera);
     },
     { passive: false },
   );
 
   resetViewButton.addEventListener("click", () => {
     resetCamera(camera);
-    updateViewUniform(gpu, camera);
   });
 }
 
-function renderFrame(gpu: WebGpuState, population: number, drawHighlight: boolean): void {
-  const encoder = gpu.device.createCommandEncoder({
-    label: "agent-render-encoder",
-  });
-  const view = gpu.context.getCurrentTexture().createView();
+function submitSimulationSteps(gpu: WebGpuState, stepCount: number): void {
+  if (stepCount <= 0) {
+    return;
+  }
 
+  const encoder = gpu.device.createCommandEncoder({
+    label: "gpu-simulation-step-encoder",
+  });
+  gpu.simulation.encodeSteps(encoder, stepCount);
+  gpu.device.queue.submit([encoder.finish()]);
+}
+
+function submitRenderFrame(gpu: WebGpuState, camera: CameraState): void {
+  const encoder = gpu.device.createCommandEncoder({
+    label: "gpu-simulation-render-encoder",
+  });
   const pass = encoder.beginRenderPass({
-    label: "agent-render-pass",
+    label: "gpu-simulation-render-pass",
     colorAttachments: [
       {
-        view,
+        view: gpu.context.getCurrentTexture().createView(),
         clearValue: { r: 0.012, g: 0.014, b: 0.018, a: 1 },
         loadOp: "clear",
         storeOp: "store",
@@ -754,25 +383,12 @@ function renderFrame(gpu: WebGpuState, population: number, drawHighlight: boolea
     ],
   });
 
-  pass.setPipeline(gpu.gridPipeline);
-  pass.setBindGroup(0, gpu.gridBindGroup);
-  pass.draw(3);
-
-  if (drawHighlight) {
-    pass.setPipeline(gpu.glowPipeline);
-    pass.setBindGroup(0, gpu.glowBindGroup);
-    pass.draw(6, TILE_COPY_COUNT);
-  }
-
-  pass.setPipeline(gpu.pipeline);
-  pass.setBindGroup(0, gpu.bindGroup);
-  pass.draw(3, population * TILE_COPY_COUNT);
+  gpu.simulation.encodeRender(pass, camera, canvasAspect());
   pass.end();
-
   gpu.device.queue.submit([encoder.finish()]);
 }
 
-function updateFps(now: number, state: FpsState): void {
+function updateFps(now: number, state: FpsState): number | null {
   state.frames += 1;
 
   if (now - state.last >= 500) {
@@ -780,7 +396,10 @@ function updateFps(now: number, state: FpsState): void {
     fpsEl.textContent = `${fps} FPS`;
     state.frames = 0;
     state.last = now;
+    return fps;
   }
+
+  return null;
 }
 
 function updateSimulationHud(stats: SimulationStats): void {
@@ -789,6 +408,10 @@ function updateSimulationHud(stats: SimulationStats): void {
   birthsEl.textContent = `${stats.births.toLocaleString()} births`;
   deathsEl.textContent = `${stats.deaths.toLocaleString()} deaths`;
   generationEl.textContent = `gen ${stats.generation.toLocaleString()}`;
+
+  if (benchmarkMode) {
+    setStatus(`${stats.stepsPerSecond.toLocaleString()} GPU steps/s, no per-agent readback`);
+  }
 }
 
 function parseSimRate(): SimRate {
@@ -796,8 +419,7 @@ function parseSimRate(): SimRate {
     return "max";
   }
 
-  const value = Number(speedSelect.value);
-  return Number.isFinite(value) && value > 0 ? value : 1;
+  return normalizeSimRate(Number(speedSelect.value));
 }
 
 function renderFrameIntervalMs(): number {
@@ -809,6 +431,14 @@ function renderFrameIntervalMs(): number {
   return Number.isFinite(fps) && fps > 0 ? 1000 / fps : 0;
 }
 
+function maxModeStepsPerFrame(): number {
+  if (benchmarkMode || renderFpsSelect.value !== "display") {
+    return MAX_MODE_STEPS_PER_FRAME;
+  }
+
+  return 1;
+}
+
 function parseSeed(): number {
   const value = Number(seedInput.value);
   if (!Number.isFinite(value)) {
@@ -818,24 +448,39 @@ function parseSeed(): number {
   return Math.max(0, Math.floor(value)) >>> 0;
 }
 
+function initialStats(): SimulationStats {
+  return {
+    population: DEFAULT_POPULATION,
+    births: 0,
+    deaths: 0,
+    generation: 0,
+    simSteps: 0,
+    stepsPerSecond: 0,
+  };
+}
+
 async function run(): Promise<void> {
   resizeCanvasToDisplaySize();
   window.addEventListener("resize", resizeCanvasToDisplaySize);
 
   seedInput.value = String(INITIAL_SEED);
+  if (benchmarkMode) {
+    speedSelect.value = "max";
+    renderFpsSelect.value = "15";
+  }
 
-  const worker = new Worker(new URL("./simulation-worker.ts", import.meta.url), {
-    type: "module",
-  });
   const camera = createDefaultCamera();
   const fpsState = { frames: 0, last: performance.now() };
-  let activeEpoch = 0;
   let gpu: WebGpuState | null = null;
-  let latestSnapshot: WorkerSnapshotMessage | null = null;
-  let lastRenderAt = Number.NEGATIVE_INFINITY;
-  let population = 0;
-  let renderLoopStarted = false;
   let paused = false;
+  let previousTickAt = performance.now();
+  let stepRemainderSeconds = 0;
+  let lastRenderAt = Number.NEGATIVE_INFINITY;
+  let lastStatsReadAt = Number.NEGATIVE_INFINITY;
+  let bestDisplayFps = 0;
+  let displayModeSmoothedFps = 0;
+  let displayModeExtraStepBudget = 0;
+  let displayModeExtraStepAccumulator = 0;
 
   const setSimulationControlsEnabled = (enabled: boolean): void => {
     pauseButton.disabled = !enabled;
@@ -845,23 +490,6 @@ async function run(): Promise<void> {
     renderFpsSelect.disabled = !enabled;
   };
 
-  const sendToWorker = (message: MainToWorkerMessage, transfer: Transferable[] = []): void => {
-    worker.postMessage(message, transfer);
-  };
-
-  const returnSnapshotBuffer = (buffer: ArrayBuffer): void => {
-    sendToWorker({ type: "returnSnapshotBuffer", buffer }, [buffer]);
-  };
-
-  const clearLatestSnapshot = (): void => {
-    if (!latestSnapshot) {
-      return;
-    }
-
-    returnSnapshotBuffer(latestSnapshot.buffer);
-    latestSnapshot = null;
-  };
-
   const updatePauseButton = (): void => {
     pauseButton.textContent = paused ? "Resume" : "Pause";
     pauseButton.setAttribute("aria-pressed", String(paused));
@@ -869,25 +497,56 @@ async function run(): Promise<void> {
 
   pauseButton.addEventListener("click", () => {
     paused = !paused;
+    previousTickAt = performance.now();
+    stepRemainderSeconds = 0;
     updatePauseButton();
-    sendToWorker({ type: "setPaused", paused });
   });
 
   speedSelect.addEventListener("change", () => {
-    sendToWorker({ type: "setSimRate", simRate: parseSimRate() });
+    previousTickAt = performance.now();
+    stepRemainderSeconds = 0;
+    displayModeExtraStepBudget = 0;
+    displayModeExtraStepAccumulator = 0;
+    displayModeSmoothedFps = 0;
   });
 
   renderFpsSelect.addEventListener("change", () => {
     lastRenderAt = Number.NEGATIVE_INFINITY;
+    displayModeExtraStepBudget = 0;
+    displayModeExtraStepAccumulator = 0;
+    displayModeSmoothedFps = 0;
   });
 
   resetButton.addEventListener("click", () => {
-    activeEpoch += 1;
-    population = 0;
-    highlightAgentIndex = NO_HIGHLIGHT;
-    clearLatestSnapshot();
-    sendToWorker({ type: "reset", seed: parseSeed(), epoch: activeEpoch });
+    if (!gpu) {
+      return;
+    }
+
+    gpu.simulation.reset(parseSeed());
+    previousTickAt = performance.now();
+    stepRemainderSeconds = 0;
+    lastStatsReadAt = Number.NEGATIVE_INFINITY;
+    displayModeExtraStepBudget = 0;
+    displayModeExtraStepAccumulator = 0;
+    displayModeSmoothedFps = 0;
+    updateSimulationHud(initialStats());
   });
+
+  const readStats = (now: number): void => {
+    if (!gpu || now - lastStatsReadAt < STATS_INTERVAL_MS) {
+      return;
+    }
+
+    lastStatsReadAt = now;
+    void gpu.simulation
+      .readStatsAsync()
+      .then(updateSimulationHud)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(message);
+        console.error(error);
+      });
+  };
 
   const loop = (now: number): void => {
     if (!gpu) {
@@ -895,132 +554,120 @@ async function run(): Promise<void> {
       return;
     }
 
-    if (resizeCanvasToDisplaySize()) {
-      updateViewUniform(gpu, camera);
-    }
+    resizeCanvasToDisplaySize();
 
     const renderIntervalMs = renderFrameIntervalMs();
     const shouldRender =
       renderIntervalMs === 0 ||
       lastRenderAt === Number.NEGATIVE_INFINITY ||
       now - lastRenderAt >= renderIntervalMs - 0.5;
+    let steps = 0;
+
+    if (paused) {
+      previousTickAt = now;
+      stepRemainderSeconds = 0;
+    } else {
+      const elapsedSeconds = Math.max(0, (now - previousTickAt) / 1000);
+      previousTickAt = now;
+      const simRate = parseSimRate();
+
+      if (renderIntervalMs === 0 && !benchmarkMode) {
+        if (simRate === "max") {
+          displayModeExtraStepAccumulator += displayModeExtraStepBudget;
+          const extraSteps = Math.min(
+            DISPLAY_MODE_MAX_EXTRA_STEPS_PER_FRAME,
+            Math.floor(displayModeExtraStepAccumulator),
+          );
+          displayModeExtraStepAccumulator -= extraSteps;
+          steps = 1 + extraSteps;
+        } else {
+          stepRemainderSeconds += elapsedSeconds * simRate;
+          stepRemainderSeconds = Math.min(stepRemainderSeconds, FIXED_STEP_SECONDS);
+
+          if (stepRemainderSeconds >= FIXED_STEP_SECONDS) {
+            steps = 1;
+            stepRemainderSeconds -= FIXED_STEP_SECONDS;
+          }
+        }
+      } else {
+        const due = stepsDueForFrame(
+          elapsedSeconds,
+          simRate,
+          stepRemainderSeconds,
+          maxModeStepsPerFrame(),
+        );
+        steps = due.steps;
+        stepRemainderSeconds = due.remainder;
+      }
+    }
 
     if (shouldRender) {
-      if (latestSnapshot) {
-        const snapshot = latestSnapshot;
-        latestSnapshot = null;
-        uploadSnapshot(gpu, snapshot);
-        population = snapshot.stats.population;
-        highlightAgentIndex =
-          snapshot.highlightIndex >= 0 && snapshot.highlightIndex < population
-            ? snapshot.highlightIndex
-            : NO_HIGHLIGHT;
-        updateViewUniform(gpu, camera);
-        updateSimulationHud(snapshot.stats);
-        returnSnapshotBuffer(snapshot.buffer);
-      }
+      submitRenderFrame(gpu, camera);
+      const fps = updateFps(now, fpsState);
+      if (fps !== null && renderIntervalMs === 0 && !benchmarkMode) {
+        displayModeSmoothedFps =
+          displayModeSmoothedFps === 0
+            ? fps
+            : displayModeSmoothedFps +
+              (fps - displayModeSmoothedFps) * DISPLAY_MODE_FPS_EMA_ALPHA;
+        bestDisplayFps = Math.max(bestDisplayFps, displayModeSmoothedFps);
 
-      renderFrame(gpu, population, highlightAgentIndex !== NO_HIGHLIGHT);
-      updateFps(now, fpsState);
+        if (bestDisplayFps > 0) {
+          const targetFps = bestDisplayFps * DISPLAY_MODE_FPS_HEADROOM;
+          const errorFps = displayModeSmoothedFps - targetFps;
+          const controlledError =
+            Math.abs(errorFps) <= DISPLAY_MODE_ERROR_DEADBAND_FPS ? 0 : errorFps;
+          const delta = clamp(
+            controlledError * DISPLAY_MODE_P_GAIN,
+            -DISPLAY_MODE_EXTRA_STEP_DELTA_LIMIT,
+            DISPLAY_MODE_EXTRA_STEP_DELTA_LIMIT,
+          );
+
+          displayModeExtraStepBudget = clamp(
+            displayModeExtraStepBudget + delta,
+            0,
+            DISPLAY_MODE_MAX_EXTRA_STEPS_PER_FRAME,
+          );
+          displayModeExtraStepAccumulator = Math.min(
+            displayModeExtraStepAccumulator,
+            displayModeExtraStepBudget,
+          );
+        }
+      }
       lastRenderAt = now;
     }
 
+    submitSimulationSteps(gpu, steps);
+    readStats(now);
     requestAnimationFrame(loop);
   };
-
-  const startRenderLoop = (): void => {
-    if (renderLoopStarted) {
-      return;
-    }
-
-    renderLoopStarted = true;
-    requestAnimationFrame(loop);
-  };
-
-  const handleReady = async (
-    message: Extract<WorkerToMainMessage, { type: "ready" }>,
-  ): Promise<void> => {
-    if (!gpu) {
-      const agentByteSize = message.agentF32Len * Float32Array.BYTES_PER_ELEMENT;
-      const nextGpu = await createWebGpuState(agentByteSize);
-      gpu = nextGpu;
-      setUpCameraControls(nextGpu, camera);
-      updateViewUniform(nextGpu, camera);
-
-      for (let i = 0; i < SNAPSHOT_BUFFER_COUNT; i += 1) {
-        returnSnapshotBuffer(new ArrayBuffer(agentByteSize));
-      }
-
-      setStatus(`${nextGpu.adapter.info?.description || "WebGPU"} ready`);
-      setSimulationControlsEnabled(true);
-      startRenderLoop();
-    }
-
-    if (message.epoch === activeEpoch) {
-      updateSimulationHud(message.stats);
-    }
-  };
-
-  worker.addEventListener("message", (event: MessageEvent<WorkerToMainMessage>) => {
-    const message = event.data;
-
-    switch (message.type) {
-      case "ready":
-        void handleReady(message).catch((error: unknown) => {
-          const text = error instanceof Error ? error.message : String(error);
-          setStatus(text);
-          fpsEl.textContent = "WebGPU unavailable";
-          console.error(error);
-        });
-        break;
-      case "snapshot":
-        if (message.epoch !== activeEpoch) {
-          returnSnapshotBuffer(message.buffer);
-          break;
-        }
-
-        clearLatestSnapshot();
-        latestSnapshot = message;
-        updateSimulationHud(message.stats);
-        break;
-      case "stats":
-        if (message.epoch === activeEpoch) {
-          updateSimulationHud(message.stats);
-        }
-        break;
-      case "error":
-        setStatus(message.message);
-        console.error(message.message);
-        break;
-    }
-  });
 
   setSimulationControlsEnabled(false);
-  setStatus("Starting simulation worker");
+  setStatus("Starting GPU simulation");
   updatePauseButton();
-  updateSimulationHud({
-    population: 0,
-    births: 0,
-    deaths: 0,
-    generation: 0,
-    simSteps: 0,
-    stepsPerSecond: 0,
-  });
+  updateSimulationHud(initialStats());
 
-  sendToWorker({
-    type: "init",
-    worldSize: WORLD_SIZE,
-    population: POPULATION,
-    seed: INITIAL_SEED,
-    epoch: activeEpoch,
-    paused,
-    simRate: parseSimRate(),
-  });
+  gpu = await createWebGpuState(INITIAL_SEED);
+  let selfCheckSummary = "";
+  if (selfCheckMode) {
+    setStatus("Running GPU self-check");
+    const results = await runGpuSelfCheck(gpu.device, gpu.format);
+    console.table(results);
+    selfCheckSummary = `${results.length} GPU self-checks passed; `;
+  }
+  setUpCameraControls(camera);
+  setStatus(
+    benchmarkMode
+      ? "Benchmark mode: GPU simulation active"
+      : `${selfCheckSummary}${gpu.adapterLabel} ready`,
+  );
+  setSimulationControlsEnabled(true);
+  requestAnimationFrame(loop);
 }
 
 run().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   setStatus(message);
-  fpsEl.textContent = "WebGPU unavailable";
+  fpsEl.textContent = "WebGPU error";
   console.error(error);
 });
