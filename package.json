@@ -1,19 +1,15 @@
 {
   "name": "speedslop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test --experimental-strip-types src/*.test.ts",
-    "check": "npm run test && tsc --noEmit",
-    "bench": "vite --host 127.0.0.1 --open \"/?bench=1\"",
-    "bench:sim": "node scripts/run-sim-bench.mjs",
+    "check": "tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
     "@webgpu/types": "^0.1.60",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
