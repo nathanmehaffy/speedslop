@@ -2,18 +2,23 @@
 //
 // Wraps the per-frame submission in a pair of WebGPU timestamps (start of the
 // simulation work, end of the render work) and reads the elapsed GPU time back
-// asynchronously. The readback is pipelined through a small pool of mappable
-// buffers so the CPU never blocks on the GPU: a sample taken on one frame is
-// consumed a frame or two later. Requires the device to have been created with
-// the "timestamp-query" feature (see gpu.ts).
+// asynchronously. Each sample is paired with a synchronous CPU measurement from
+// the same frame (main-thread work through command encoding). The readback is
+// pipelined through a small pool of mappable buffers so the CPU never blocks on
+// the GPU: a sample taken on one frame is consumed a frame or two later.
+// Requires the device to have been created with the "timestamp-query" feature
+// (see gpu.ts).
 
 const TIMESTAMP_COUNT = 2;
 const TIMESTAMP_BYTES = TIMESTAMP_COUNT * 8; // two u64 nanosecond stamps
+// Extra headroom so a slow mapAsync does not drop samples and blind the controller.
 const READBACK_POOL = 3;
 
 export interface TimingSample {
   /** Measured GPU time for the frame, in milliseconds. */
   gpuMs: number;
+  /** Main-thread work through command encoding for the frame, in milliseconds. */
+  cpuMs: number;
   /** Integer simulation steps encoded for the frame. */
   steps: number;
 }
@@ -21,6 +26,7 @@ export interface TimingSample {
 interface PendingReadback {
   buffer: GPUBuffer;
   steps: number;
+  cpuMs: number;
   mapping: boolean;
 }
 
@@ -71,20 +77,20 @@ export class GpuProfiler {
 
   /**
    * Resolve this frame's timestamps and queue a copy into a readback buffer.
-   * Call once, after the render pass has been encoded. `steps` is tagged onto
-   * the sample so the controller knows what workload produced the timing.
+   * Call once, after the render pass has been encoded. `steps` and `cpuMs` are
+   * tagged onto the sample so the controller knows what workload produced it.
    */
-  resolve(encoder: GPUCommandEncoder, steps: number): void {
+  resolve(encoder: GPUCommandEncoder, steps: number, cpuMs: number): void {
     encoder.resolveQuerySet(this.querySet, 0, TIMESTAMP_COUNT, this.resolveBuffer, 0);
     const buffer = this.freeBuffers.pop();
     if (!buffer) {
       return; // All readback buffers in flight; drop this sample.
     }
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, buffer, 0, TIMESTAMP_BYTES);
-    this.pending.push({ buffer, steps, mapping: false });
+    this.pending.push({ buffer, steps, cpuMs, mapping: false });
   }
 
-  /** Kick the async readback of the oldest pending sample (strict FIFO). */
+  /** Kick async readback of the oldest pending sample (strict single-in-flight FIFO). */
   poll(): void {
     const front = this.pending[0];
     if (!front || front.mapping) {
@@ -99,7 +105,11 @@ export class GpuProfiler {
         front.buffer.unmap();
         this.recycle(front);
         if (deltaNs > 0n) {
-          this.latest = { gpuMs: Number(deltaNs) / 1e6, steps: front.steps };
+          this.latest = {
+            gpuMs: Number(deltaNs) / 1e6,
+            cpuMs: front.cpuMs,
+            steps: front.steps,
+          };
           this.fresh = true;
         }
       })

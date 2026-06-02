@@ -1,18 +1,18 @@
-// Throughput controller (direct GPU timing).
+// Throughput controller (GPU + CPU frame cost).
 //
 // Picks how many simulation steps to run per displayed frame so the render
-// stays locked to the display refresh. Unlike a blind timing-only loop, this
-// controller is driven by the actual GPU time of each frame (measured with
-// timestamp queries; see profiler.ts). With a continuous cost signal the law is
-// simple: GPU time is monotone in steps, so nudging the rate by the ratio of
-// the time budget to the measured time converges to the operating point where
-// GPU time equals the budget.
+// stays locked to the display refresh. The controller is driven by measured
+// per-frame work cost: GPU time (timestamp queries; see profiler.ts) plus
+// synchronous main-thread time through command encoding. With a continuous cost
+// signal the law is simple: frame cost is monotone in steps, so nudging the
+// rate by the ratio of the time budget to the measured cost converges to the
+// operating point where work time equals the budget.
 //
 // The module is pure (numbers in, numbers out) so it can be unit-tested without
 // a GPU or a browser.
 
 export interface ControllerConfig {
-  /** Fraction of the display refresh interval budgeted for GPU work. */
+  /** Fraction of the display refresh interval budgeted for frame work. */
   targetUtilization: number;
   /** EWMA factor (0..1) applied to log-rate updates; higher reacts faster. */
   smoothing: number;
@@ -21,7 +21,7 @@ export interface ControllerConfig {
   /** Bounds on the continuous steps-per-frame control variable. */
   rateMin: number;
   rateMax: number;
-  /** Initial steps-per-frame before any GPU timing arrives. */
+  /** Initial steps-per-frame before any timing arrives. */
   rateInitial: number;
   /** Number of recent frame deltas kept for refresh-interval estimation. */
   refreshWindow: number;
@@ -33,8 +33,8 @@ export interface ControllerConfig {
   minRefreshMs: number;
   /** Reject deltas longer than this multiple of the current estimate (stalls/drops). */
   maxRefreshRatio: number;
-  /** Reject a delta as a refresh sample if GPU time exceeded this fraction of it. */
-  gpuBoundFraction: number;
+  /** Reject a delta as a refresh sample if frame cost exceeded this fraction of it. */
+  frameBoundFraction: number;
 }
 
 export const DEFAULT_CONFIG: ControllerConfig = {
@@ -49,7 +49,7 @@ export const DEFAULT_CONFIG: ControllerConfig = {
   maxPauseDeltaMs: 250,
   minRefreshMs: 2,
   maxRefreshRatio: 2.5,
-  gpuBoundFraction: 0.9,
+  frameBoundFraction: 0.9,
 };
 
 export class ThroughputController {
@@ -61,6 +61,8 @@ export class ThroughputController {
   private readonly deltas: number[] = [];
   private refreshMs = 16.6667;
   private lastGpuMs: number | null = null;
+  private lastCpuMs: number | null = null;
+  private frameCostMs: number | null = null;
 
   constructor(config: Partial<ControllerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -69,11 +71,11 @@ export class ThroughputController {
 
   /**
    * Record the wall-clock delta (ms) since the previous frame. Used only to
-   * estimate the display refresh interval (the GPU-time budget); it does not
+   * estimate the display refresh interval (the work budget); it does not
    * directly move the rate.
    *
    * Only frames that look vsync-limited update the estimate. Slow frames - from
-   * our own GPU load (GPU-bound), an external stall (right-click menu, lost
+   * our own load (frame-bound), an external stall (right-click menu, lost
    * focus, a notification), or a dropped vsync - are rejected, because letting
    * them raise the refresh estimate would inflate the budget and trap the loop
    * at a degraded frame rate. Faster deltas are always allowed through (down to
@@ -89,7 +91,10 @@ export class ThroughputController {
     if (deltaMs > this.refreshMs * this.config.maxRefreshRatio) {
       return;
     }
-    if (this.lastGpuMs !== null && this.lastGpuMs > deltaMs * this.config.gpuBoundFraction) {
+    if (
+      this.frameCostMs !== null &&
+      this.frameCostMs > deltaMs * this.config.frameBoundFraction
+    ) {
       return;
     }
     this.deltas.push(deltaMs);
@@ -100,23 +105,29 @@ export class ThroughputController {
   }
 
   /**
-   * Record the measured GPU time (ms) for a frame. Render-only frames are useful
-   * telemetry, but they do not say how expensive a simulation step is.
+   * Record measured GPU and CPU time (ms) for a frame. Render-only frames are
+   * useful telemetry, but they do not say how expensive a simulation step is.
    */
-  recordGpuTime(gpuMs: number, ranSteps: number): void {
-    if (!(gpuMs > 0) || !isFinite(gpuMs)) {
+  recordFrameCost(gpuMs: number, cpuMs: number, ranSteps: number): void {
+    const gpu = gpuMs > 0 && isFinite(gpuMs) ? gpuMs : 0;
+    const cpu = cpuMs > 0 && isFinite(cpuMs) ? cpuMs : 0;
+    if (gpu <= 0 && cpu <= 0) {
       return;
     }
-    this.lastGpuMs = gpuMs;
+
+    this.lastGpuMs = gpu > 0 ? gpu : null;
+    this.lastCpuMs = cpu > 0 ? cpu : null;
+    this.frameCostMs = gpu + cpu;
     if (!(ranSteps > 0) || !isFinite(ranSteps)) {
       return;
     }
 
     const budgetMs = this.refreshMs * this.config.targetUtilization;
-    // GPU time is monotone in the integer workload that actually ran, so this
+    const workMs = gpu + cpu;
+    // Frame cost is monotone in the integer workload that actually ran, so this
     // ratio moves from that measured step count toward the budget. Clamp it so
     // one noisy sample cannot swing the continuous rate wildly.
-    const factor = clamp(budgetMs / gpuMs, 1 / this.config.maxStepFactor, this.config.maxStepFactor);
+    const factor = clamp(budgetMs / workMs, 1 / this.config.maxStepFactor, this.config.maxStepFactor);
     const targetLogRate = Math.log(ranSteps * factor);
 
     this.logRate += this.config.smoothing * (targetLogRate - this.logRate);
@@ -133,6 +144,14 @@ export class ThroughputController {
 
   get lastGpuTimeMs(): number | null {
     return this.lastGpuMs;
+  }
+
+  get lastCpuTimeMs(): number | null {
+    return this.lastCpuMs;
+  }
+
+  get lastFrameCostMs(): number | null {
+    return this.frameCostMs;
   }
 
   // The refresh interval is estimated from a low percentile of recent deltas:

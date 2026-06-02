@@ -36,7 +36,7 @@ export const AGENT_TRIANGLE_SIZE = 0.004;
 export const BORDER_COLOR: [number, number, number, number] = [0.5, 0.5, 0.5, 1];
 export const CLEAR_COLOR = { r: 0.02, g: 0.03, b: 0.06, a: 1 };
 
-// Camera zoom limits in pixels-per-world-unit and wheel sensitivity.
-export const MIN_ZOOM = 32;
-export const MAX_ZOOM = 100_000;
+// Camera zoom limits relative to the fit-world reference (see Camera.fitWorld).
+export const ZOOM_OUT_LIMIT = 2; // max zoom-out as a multiple of the fit zoom
+export const ZOOM_IN_LIMIT = 20; // max zoom-in as a multiple of the fit zoom
 export const ZOOM_SENSITIVITY = 0.0015;

@@ -73,7 +73,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     try {
       const sample = profiler.takeSample();
       if (sample) {
-        controller.recordGpuTime(sample.gpuMs, sample.steps);
+        controller.recordFrameCost(sample.gpuMs, sample.cpuMs, sample.steps);
       }
       if (started) {
         controller.recordFrameDelta(timestamp - lastTimestamp);
@@ -95,11 +95,12 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
 
       renderer.update(camera.center, camera.zoom, viewport.width, viewport.height, camera.visibleTiles(viewport));
 
+      const workStart = performance.now();
       const encoder = device.createCommandEncoder();
       simulation.encode(encoder, steps, steps > 0 ? profiler.computePassWrites() : undefined);
       const view = context.getCurrentTexture().createView();
       renderer.encode(encoder, view, profiler.renderPassWrites(steps > 0));
-      profiler.resolve(encoder, steps);
+      profiler.resolve(encoder, steps, performance.now() - workStart);
       device.queue.submit([encoder.finish()]);
       profiler.poll();
 
@@ -111,7 +112,9 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
           elapsedMs: elapsed,
           frames: windowFrames,
           steps: windowSteps,
+          frameMs: controller.lastFrameCostMs,
           gpuMs: controller.lastGpuTimeMs,
+          cpuMs: controller.lastCpuTimeMs,
         });
         windowStart = timestamp;
         windowFrames = 0;

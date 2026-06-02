@@ -13,13 +13,16 @@ See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the curr
 - `src/main.ts` handles DOM lookup and fatal-error display.
 - `src/app.ts` owns the `requestAnimationFrame` loop, wires together GPU setup, simulation, rendering, throughput control, and the fps/steps monitor, and handles pan/zoom input.
 - `src/gpu.ts` initializes WebGPU (requiring the `timestamp-query` feature), resizes the canvas, and installs GPU error handlers.
-- `src/simulation.ts` is the torus agent simulation: fixed-capacity agent slots, random rainbow movement, GPU-side sine-waved births/deaths, and a post-batch counting-sort compaction that builds the dense cell-sorted draw list.
+- `src/simulation.ts` is the torus agent simulation: fixed-capacity agent slots, random rainbow movement, GPU-side sine-waved births/deaths, and a per-step counting-sort that builds the cell-sorted neighbor index (`dense` + `cellStart`) used for rendering and future k-nearest queries.
 - `src/renderer.ts` draws agents as direction-facing HSV triangles via an indirect draw, tiled across the visible viewport to show torus wrapping with grey edge borders.
 - `src/layout.ts` centralizes GPU buffer-layout constants and shared WGSL structs used by both simulation and rendering.
 - `src/spatial.ts` is pure, tested cell-index / toroidal-distance / population-target math that mirrors small shader-side invariants.
 - `src/camera.ts` is the pure, tested pan/zoom camera (world<->screen transform and visible-tile range).
-- `src/profiler.ts` wraps each frame in a `timestamp-query` pair and reads the GPU time back through a non-blocking pipelined buffer pool.
-- `src/controller.ts` is the pure, tested throughput controller driven by measured GPU frame time.
+- `src/profiler.ts` wraps each frame in a `timestamp-query` pair, pairs it with a
+  synchronous CPU encode measurement, and reads GPU time back through a
+  non-blocking pipelined buffer pool.
+- `src/controller.ts` is the pure, tested throughput controller driven by measured
+  frame cost (GPU + CPU encode).
 - `src/telemetry.ts` formats the lightweight on-screen monitor.
 - `src/config.ts` centralizes small runtime constants.
 

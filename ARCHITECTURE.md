@@ -63,8 +63,8 @@ behavioral *content* of the simulation is deliberately out of scope here.
   device-loss/error hooks.
 - `src/simulation.ts` is the torus agent simulation and its GPU buffers/pipelines:
   fixed-capacity agent slots, random rainbow movement, GPU-side births/deaths
-  that sine-wave population around half capacity, and a post-batch counting-sort
-  compaction that builds the dense cell-sorted draw list.
+  that sine-wave population around half capacity, and a per-step counting-sort
+  that builds the cell-sorted neighbor index (`dense` + `cellStart`).
 - `src/renderer.ts` renders agents as direction-facing HSV triangles into the
   swapchain texture, tiled across the viewport to visualize torus wrapping.
 - `src/layout.ts` centralizes GPU buffer-layout constants and WGSL structs shared
@@ -86,15 +86,18 @@ behavioral *content* of the simulation is deliberately out of scope here.
 Each `requestAnimationFrame(t)` callback:
 
 1. **Sense.** Feed the rAF delta to the controller's refresh-interval estimator
-   (the budget). Consume the most recent completed GPU-time sample, if any.
+   (the budget). Consume the most recent completed frame-cost sample (GPU +
+   paired CPU encode time), if any.
 2. **Decide.** Update the control variable `rate` (simulation steps per displayed
-   frame, a positive real) from the measured GPU time. Convert it to an integer
+   frame, a positive real) from the measured frame cost. Convert it to an integer
    step count for this frame via the step accumulator (below).
 3. **Encode** one command buffer:
    - the chosen number of simulation steps, back to back (each step is its own
      sequence of dependent compute passes), with no CPU work in between, with the
      **start** timestamp written at the first pass;
    - the render pass into the swapchain texture, with the **end** timestamp;
+   - bracket main-thread encode work with `performance.now()` and tag the elapsed
+     CPU time onto the same pipelined sample as the GPU timestamps;
    - `resolveQuerySet` + a copy into a mappable readback buffer.
 4. **Submit once,** then kick the async readback (no await).
 5. `requestAnimationFrame(next)`.
@@ -104,8 +107,8 @@ GPU.
 
 ## The throughput controller
 
-The controller regulates a single continuous variable, driven by the measured GPU
-time of each frame.
+The controller regulates a single continuous variable, driven by the measured
+frame cost (GPU timestamp span plus synchronous CPU encode time) of each frame.
 
 ### Control variable: steps-per-frame as a real number
 
@@ -131,26 +134,27 @@ expensive to hold refresh.
   the window moves to another monitor). Estimate it continuously as a low
   percentile of recent rAF deltas (rendering cannot beat the display refresh, so
   the fastest frames cluster at the true interval). Never hard-code it.
-- The GPU-time budget is a fraction of that interval (`targetUtilization`, e.g.
-  0.85), leaving margin for compositor jitter and the unmeasured CPU/encode slice.
+- The **frame-work budget** is a fraction of that interval (`targetUtilization`,
+  e.g. 0.85), leaving margin for compositor/present jitter after submit.
 
 ### Control law: nudge toward the budget
 
-GPU time is monotonically increasing in the number of simulation steps, so finding
-the operating point is one-dimensional root-finding with a measured signal. Each
-completed GPU-time sample `g` (for the integer step count `s` that actually ran)
-drives a multiplicative update in log space:
+Frame cost is monotonically increasing in the number of simulation steps, so
+finding the operating point is one-dimensional root-finding with a measured
+signal. Each completed sample `w = g + c` (GPU time `g`, CPU encode time `c`, for
+the integer step count `s` that actually ran) drives a multiplicative update in log
+space:
 
 ```
-factor     = clamp(budget / g, 1/maxStepFactor, maxStepFactor)
+factor     = clamp(budget / w, 1/maxStepFactor, maxStepFactor)
 target     = s * factor
 log(rate) += smoothing * (log(target) - log(rate))
 ```
 
-- The fixed point is `g = budget`: when measured time equals the budget, `factor`
-  is 1 and the rate holds. Because `g(r)` is monotone, the iteration converges to
+- The fixed point is `w = budget`: when measured cost equals the budget, `factor`
+  is 1 and the rate holds. Because `w(r)` is monotone, the iteration converges to
   that point — and the linear cost offset (fixed render/overhead time) is absorbed
-  automatically, since the law only cares that `g` hits the budget.
+  automatically, since the law only cares that `w` hits the budget.
 - `clamp(..., maxStepFactor)` bounds how far one noisy sample can move the rate
   (e.g. an overhead-only frame at a sub-1 rate), and `smoothing` is an EWMA that
   damps measurement noise. Together they give fast acquisition (a few samples to
@@ -159,17 +163,23 @@ log(rate) += smoothing * (log(target) - log(rate))
   thousands of steps per frame.
 - Responsiveness is symmetric and fast in **both** directions: a sudden cost
   increase (thermal throttle, zoom, population swing, another app contending) shows
-  up immediately as larger `g` and the rate drops within a sample or two; freed-up
-  headroom shows up as smaller `g` and the rate climbs just as quickly. There is no
+  up immediately as larger `w` and the rate drops within a sample or two; freed-up
+  headroom shows up as smaller `w` and the rate climbs just as quickly. There is no
   blind probing asymmetry, because headroom is observed directly rather than
   inferred from the absence of dropped frames.
 
 ### Pipelined measurement (no stall)
 
-The timestamps are resolved every frame and copied into a rotating pool of mappable
-buffers; `mapAsync` completions are consumed FIFO a frame or two later. The
-controller simply uses the most recent completed sample, so the one-to-two-frame
+GPU timestamps are resolved every frame and copied into a rotating pool of
+mappable buffers; each entry also carries the synchronous CPU encode duration from
+the same frame. `mapAsync` completions are consumed FIFO a frame or two later.
+The controller simply uses the most recent completed sample, so the one-to-two-frame
 read latency is harmless for a slowly varying operating point.
+
+### Remaining unmeasured slice
+
+Time from `queue.submit()` through compositor present is still outside the control
+loop. `targetUtilization` leaves headroom for that jitter.
 
 ### Degenerate case
 
@@ -177,14 +187,6 @@ If even one step per frame overruns the budget, `rate` falls below 1 and the
 render rate drops below refresh. No architecture can prevent this when the device
 cannot run a single step within a refresh interval; the accumulator makes the
 degradation smooth (steps spread across multiple frames).
-
-### Known limitation: CPU encode cost is unmeasured
-
-The timestamp pair measures GPU time only. Recording N steps per frame is O(N) CPU
-work (see deferred items); if command encoding ever dominates the frame, GPU time
-can stay under budget while the actual frame time does not. `rateMax` bounds this,
-and the `targetUtilization` margin absorbs the small encode slice, but a future
-refinement could fold the CPU encode duration into the budget.
 
 ## Simulation data model
 
@@ -218,22 +220,23 @@ accumulation.
 
 ## Per-step simulation pipeline
 
-The current placeholder behavior does not yet consume neighbor data, so the sim
-does not run a sensory/k-nearest pass. Each simulation step does only the work it
-needs now:
+Each simulation step begins with a full cell histogram, prefix scan, and scatter
+that build a query-ready neighbor index (`cellStart` offsets plus cell-sorted
+`dense` with positions). A future sensory/k-nearest pass will read that structure;
+placeholder behavior does not consume it yet.
 
-1. **Step counter bump.**
-2. **Population scan:** clear cell counters, histogram live agents by cell, gather
-   dead slots into the free list, and prefix-sum the counts to produce the live
-   count used by demographics.
-3. **Demographics:** compute the current target population and set spawn/kill
-   amounts.
+1. **Grid reset and step bump:** clear cell counters, increment the GPU step
+   counter, reset the free-slot counter.
+2. **Population scan:** histogram live agents by cell, gather dead slots into the
+   free list, prefix-sum counts into `cellStart`, scatter into `dense`.
+3. **Demographics:** compute the target population and set spawn/kill amounts
+   from the live count.
 4. **Integration / churn:** live agents random-walk, probabilistic deaths clear
    live flags, and births fill free slots.
 
-After the whole step batch, a final counting-sort scatter compacts the current
-live agents into the dense cell-sorted draw list and writes indirect draw args.
-This keeps rendering current without paying for an unused sensory pipeline.
+After the step batch, `writeIndirect` copies the last step's live count into draw
+args. The render pass reuses that step's `dense` list (start-of-last-step layout;
+with many steps per frame the lag is negligible).
 
 ## Render path
 
@@ -248,12 +251,8 @@ This keeps rendering current without paying for an unused sensory pipeline.
 
 - **Render representation details** (#5 from discussion): decided later with sim
   content.
-- **CPU command-encoding cost:** recording N steps per frame is CPU work that
-  scales with N, and WebGPU command buffers are single-use (no record-once/replay).
-  The timestamp pair measures GPU time only, so heavy encode cost is *not* directly
-  observed (the `targetUtilization` margin and `rateMax` bound it). Left simple for
-  now; revisit by folding CPU encode duration into the budget, or with indirect
-  dispatch / fewer passes per step, only if profiling shows CPU-bound encoding.
+- **Indirect dispatch / fewer passes per step:** optional future optimization if
+  CPU encoding becomes the dominant cost again at much higher step counts.
 - **Simulation behavioral content:** entirely out of scope for this document.
 
 ## Robustness / ops
@@ -267,9 +266,9 @@ This keeps rendering current without paying for an unused sensory pipeline.
 ## Tunable parameters (summary)
 
 - `targetUtilization` — fraction of the estimated refresh interval budgeted for
-  GPU work (the controller's set point).
+  measured frame work (the controller's set point).
 - `smoothing` — EWMA factor on the log-rate update (noise damping vs reactivity).
-- `maxStepFactor` — clamp on how far a single GPU-time sample can move the rate.
+- `maxStepFactor` — clamp on how far a single frame-cost sample can move the rate.
 - Refresh estimation window/percentile and long-pause cutoff for ignoring
   tab-backgrounding, devtools pauses, and other browser/OS interruptions.
 - `rate` bounds (`rateMax`, `rateMin`) and initial rate.

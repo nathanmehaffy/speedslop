@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Camera, type Viewport } from "./camera";
-import { MAX_ZOOM, MIN_ZOOM } from "./config";
+import { ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT } from "./config";
 
 const viewport: Viewport = { width: 800, height: 600 };
 
@@ -48,12 +48,15 @@ describe("Camera zoomBy", () => {
     expect(cam.zoom).toBeGreaterThan(200);
   });
 
-  it("clamps zoom to the configured bounds", () => {
-    const cam = new Camera({ x: 0.5, y: 0.5 }, 200);
+  it("clamps zoom to limits relative to the fit-world reference", () => {
+    const cam = new Camera();
+    cam.fitWorld(viewport);
+    const reference = (Math.min(viewport.width, viewport.height) * 0.9) / 1;
+
     cam.zoomBy(-1e6, { x: 400, y: 300 }, viewport);
-    expect(cam.zoom).toBe(MAX_ZOOM);
+    expect(cam.zoom).toBeCloseTo(reference * ZOOM_IN_LIMIT, 9);
     cam.zoomBy(1e6, { x: 400, y: 300 }, viewport);
-    expect(cam.zoom).toBe(MIN_ZOOM);
+    expect(cam.zoom).toBeCloseTo(reference / ZOOM_OUT_LIMIT, 9);
   });
 });
 

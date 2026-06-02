@@ -2,7 +2,7 @@
 // of torus tiles a viewport currently covers. No DOM or GPU dependencies, so it
 // is fully unit-testable.
 
-import { MAX_ZOOM, MIN_ZOOM, WORLD_SIZE, ZOOM_SENSITIVITY } from "./config";
+import { WORLD_SIZE, ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT, ZOOM_SENSITIVITY } from "./config";
 
 export interface Viewport {
   width: number;
@@ -27,16 +27,19 @@ export class Camera {
   center: Vec2;
   /** Pixels per world unit. */
   zoom: number;
+  /** Fit-world zoom used as the reference for relative zoom limits. */
+  private referenceZoom: number | null = null;
 
-  constructor(center: Vec2 = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 }, zoom: number = MIN_ZOOM) {
+  constructor(center: Vec2 = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 }, zoom = 1) {
     this.center = { x: center.x, y: center.y };
-    this.zoom = clampZoom(zoom);
+    this.zoom = this.clampZoom(zoom);
   }
 
   /** Set zoom so the unit world fills `fraction` of the smaller viewport axis. */
   fitWorld(viewport: Viewport, fraction = 0.9): void {
     const minAxis = Math.min(viewport.width, viewport.height);
-    this.zoom = clampZoom((minAxis * fraction) / WORLD_SIZE);
+    this.referenceZoom = (minAxis * fraction) / WORLD_SIZE;
+    this.zoom = this.clampZoom(this.referenceZoom);
     this.center = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
   }
 
@@ -49,7 +52,7 @@ export class Camera {
   /** Zoom by a wheel delta, keeping the world point under the cursor fixed. */
   zoomBy(wheelDeltaY: number, cursor: Vec2, viewport: Viewport): void {
     const before = this.screenToWorld(cursor, viewport);
-    this.zoom = clampZoom(this.zoom * Math.exp(-wheelDeltaY * ZOOM_SENSITIVITY));
+    this.zoom = this.clampZoom(this.zoom * Math.exp(-wheelDeltaY * ZOOM_SENSITIVITY));
     const halfW = viewport.width / 2;
     const halfH = viewport.height / 2;
     this.center.x = before.x - (cursor.x - halfW) / this.zoom;
@@ -85,14 +88,13 @@ export class Camera {
       maxY: Math.floor(top / WORLD_SIZE),
     };
   }
-}
 
-function clampZoom(zoom: number): number {
-  if (zoom < MIN_ZOOM) {
-    return MIN_ZOOM;
+  private clampZoom(zoom: number): number {
+    if (this.referenceZoom === null) {
+      return zoom;
+    }
+    const minZoom = this.referenceZoom / ZOOM_OUT_LIMIT;
+    const maxZoom = this.referenceZoom * ZOOM_IN_LIMIT;
+    return Math.min(maxZoom, Math.max(minZoom, zoom));
   }
-  if (zoom > MAX_ZOOM) {
-    return MAX_ZOOM;
-  }
-  return zoom;
 }

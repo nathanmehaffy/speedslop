@@ -2,7 +2,9 @@ export interface TelemetrySample {
   elapsedMs: number;
   frames: number;
   steps: number;
+  frameMs?: number | null;
   gpuMs?: number | null;
+  cpuMs?: number | null;
 }
 
 export function renderTelemetry(sample: TelemetrySample): string {
@@ -13,7 +15,12 @@ export function renderTelemetry(sample: TelemetrySample): string {
     `${fps.toFixed(1)} fps`,
     `${formatCount(stepsPerSecond)} sim steps/s`,
   ];
-  if (sample.gpuMs != null) {
+  if (sample.frameMs != null) {
+    lines.push(`${sample.frameMs.toFixed(2)} ms frame`);
+  }
+  if (sample.gpuMs != null && sample.cpuMs != null) {
+    lines.push(`${sample.gpuMs.toFixed(2)} ms gpu + ${sample.cpuMs.toFixed(2)} ms cpu`);
+  } else if (sample.gpuMs != null) {
     lines.push(`${sample.gpuMs.toFixed(2)} ms gpu`);
   }
   return lines.join("\n");

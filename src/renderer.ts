@@ -107,6 +107,7 @@ export class Renderer {
   private readonly tileBuffer: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly indirect: GPUBuffer;
+  private readonly tileScratch: Uint8Array<ArrayBuffer>;
 
   private tileCount = 0;
 
@@ -167,6 +168,7 @@ export class Renderer {
       fragment: { module, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "line-list" },
     });
+    this.tileScratch = new Uint8Array(new ArrayBuffer(MAX_TILES * TILE_STRIDE));
   }
 
   /** Update the camera transform and the per-tile offsets for this frame. */
@@ -187,14 +189,19 @@ export class Renderer {
 
     const offsets = this.collectTileOffsets(tiles);
     this.tileCount = offsets.length;
-    const data = new Uint8Array(this.tileCount * TILE_STRIDE);
-    const view = new Float32Array(data.buffer);
+    const view = new Float32Array(this.tileScratch.buffer);
     for (let i = 0; i < this.tileCount; i += 1) {
       view[(i * TILE_STRIDE) / 4 + 0] = offsets[i][0];
       view[(i * TILE_STRIDE) / 4 + 1] = offsets[i][1];
     }
     if (this.tileCount > 0) {
-      this.device.queue.writeBuffer(this.tileBuffer, 0, data);
+      this.device.queue.writeBuffer(
+        this.tileBuffer,
+        0,
+        this.tileScratch,
+        0,
+        this.tileCount * TILE_STRIDE,
+      );
     }
   }
 

@@ -1,10 +1,9 @@
 // Torus agent simulation.
 //
 // Agents live on the unit square wrapped at the edges (a torus). State is held
-// in a fixed-capacity slot array. Each step updates movement and GPU-side
-// births/deaths; after the batch, live agents are compacted into a dense,
-// cell-sorted draw list. No CPU<->GPU readback occurs: the live count drives an
-// indirect draw and demographics are computed on the GPU.
+// in a fixed-capacity slot array. Each step builds a cell-sorted neighbor index
+// (dense + cellStart), then runs demographics and movement/churn. The render
+// pass reuses the last step's dense list and indirect args. No CPU<->GPU readback.
 
 import {
   GRID_DIM,
@@ -35,7 +34,6 @@ const SCAN_CHUNK = NUM_CELLS / SCAN_WG;
 const BASE_VEL_MIN = 0.001;
 const BASE_VEL_MAX = 0.004;
 const PIPELINE_NAMES = [
-  "bump",
   "clearCells",
   "count",
   "scan",
@@ -117,11 +115,6 @@ fn cellOf(p: vec2f) -> u32 {
   return u32(cy) * params.gridDim + u32(cx);
 }
 
-@compute @workgroup_size(1)
-fn bump() {
-  globals.step = globals.step + 1u;
-}
-
 @compute @workgroup_size(${WG})
 fn clearCells(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
@@ -129,6 +122,7 @@ fn clearCells(@builtin(global_invocation_id) gid: vec3u) {
     atomicStore(&cellCount[i], 0u);
   }
   if (i == 0u) {
+    globals.step = globals.step + 1u;
     atomicStore(&globals.freeCount, 0u);
   }
 }
@@ -293,8 +287,6 @@ fn birth(@builtin(global_invocation_id) gid: vec3u) {
 `;
 
 export class Simulation {
-  readonly maxAgents = MAX_AGENTS;
-
   private readonly device: GPUDevice;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Record<PipelineName, GPUComputePipeline>;
@@ -320,6 +312,7 @@ export class Simulation {
     writeInitialAgents(this.agents.getMappedRange(), MAX_AGENTS);
     this.agents.unmap();
 
+    // Zero-initialized: step and counters start at 0.
     const meta = device.createBuffer({ size: 24, usage: storage, label: "meta" });
     const cellCount = device.createBuffer({ size: NUM_CELLS * 4, usage: storage, label: "cell-count" });
     const cellStart = device.createBuffer({ size: (NUM_CELLS + 1) * 4, usage: storage, label: "cell-start" });
@@ -398,26 +391,20 @@ export class Simulation {
     }
     const pass = encoder.beginComputePass({ label: "simulation", timestampWrites });
     pass.setBindGroup(0, this.bindGroup);
+    // WebGPU orders dispatches in one compute pass; each pass sees prior storage writes.
     for (let i = 0; i < steps; i += 1) {
-      this.dispatch(pass, "bump", 1);
       this.dispatch(pass, "clearCells", this.cellWorkgroups);
       this.dispatch(pass, "count", this.agentWorkgroups);
       this.dispatch(pass, "scan", 1);
+      this.dispatch(pass, "scatter", this.agentWorkgroups);
       this.dispatch(pass, "demographics", 1);
       this.dispatch(pass, "integrate", this.agentWorkgroups);
       this.dispatch(pass, "death", this.agentWorkgroups);
       this.dispatch(pass, "birth", this.agentWorkgroups);
     }
-    this.rebuildDrawList(pass);
-    pass.end();
-  }
-
-  private rebuildDrawList(pass: GPUComputePassEncoder): void {
-    this.dispatch(pass, "clearCells", this.cellWorkgroups);
-    this.dispatch(pass, "count", this.agentWorkgroups);
-    this.dispatch(pass, "scan", 1);
-    this.dispatch(pass, "scatter", this.agentWorkgroups);
+    // Render reads dense/indirect from the last step's pre-churn neighbor index.
     this.dispatch(pass, "writeIndirect", 1);
+    pass.end();
   }
 
   private dispatch(pass: GPUComputePassEncoder, name: PipelineName, workgroups: number): void {
