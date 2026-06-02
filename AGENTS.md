@@ -14,10 +14,10 @@ See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the curr
 - `src/app.ts` owns the `requestAnimationFrame` loop, wires together GPU setup, simulation, rendering, throughput control, and the fps/steps monitor, and handles pan/zoom input.
 - `src/gpu.ts` initializes WebGPU (requiring the `timestamp-query` feature), resizes the canvas, and installs GPU error handlers.
 - `src/simulation.ts` owns the torus simulation GPU resources and compute-pass ordering.
-- `src/simulationShader.ts` contains the WGSL simulation kernels: fixed-capacity agent slots, neural-network movement, circular hitbox collision deaths/head-on breeding, genetic crossover/mutation, random immigrants when live count is below half capacity, and the counting-sort neighbor index (`dense` + `cellStart`) used for sensing and rendering.
+- `src/simulationShader.ts` contains the WGSL simulation kernels: fixed-capacity agent slots, neural-network movement, circular hitbox collision deaths/head-on breeding, genetic crossover/mutation, random immigrants when live count is below half capacity, and the counting-sort neighbor index (`dense` + `cellStart`) used for sensing and collision.
 - `src/simulationPacking.ts` owns CPU-side simulation parameter and initial-buffer packing.
 - `src/simulationPolicy.ts` holds pure, tested policy invariants for sensing, collision broadphase bounds, and demographic slot allocation.
-- `src/renderer.ts` draws agents as direction-facing HSV triangles via an indirect draw, tiled across camera-provided visible tile offsets to show torus wrapping with grey edge borders.
+- `src/renderer.ts` draws fixed agent slots as direction-facing HSV triangles, discarding dead slots in the vertex shader and instancing across camera-provided visible tile offsets to show torus wrapping with grey edge borders.
 - `src/layout.ts` centralizes GPU buffer-layout constants and shared WGSL structs used by both simulation and rendering.
 - `src/spatial.ts` is pure, tested cell-index / toroidal-distance math that mirrors small shader-side invariants.
 - `src/collision.ts` and `src/genetics.ts` are pure, tested CPU oracles for collision classification and neural genome crossover/mutation contracts.

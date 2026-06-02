@@ -24,7 +24,6 @@ import {
   AGENT_F32,
   BIRTH_EVENT_BYTES,
   DENSE_BYTES,
-  DRAW_INDIRECT_BYTES,
   PLANNED_BYTES,
   PLANNED_F32,
   SIM_PARAMS_BYTES,
@@ -41,7 +40,6 @@ describe("GPU layout contracts", () => {
     expect(PLANNED_BYTES).toBe(16);
     expect(BIRTH_EVENT_BYTES).toBe(8);
     expect(DENSE_BYTES).toBe(16);
-    expect(DRAW_INDIRECT_BYTES).toBe(16);
   });
 
   it("packs simulation params at the offsets expected by WGSL", () => {

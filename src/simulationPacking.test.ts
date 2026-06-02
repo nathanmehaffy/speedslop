@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AGENT_F32, DENSE_BYTES, DRAW_INDIRECT_BYTES, SIM_PARAMS_BYTES } from "./layout";
+import { AGENT_F32, DENSE_BYTES, SIM_PARAMS_BYTES } from "./layout";
 import {
   SIM_PARAM_F32,
   SIM_PARAM_U32,
@@ -8,7 +8,6 @@ import {
   initialAliveCount,
   writeInitialAgents,
   writeInitialDense,
-  writeInitialIndirect,
 } from "./simulationPacking";
 import { GRID_DIM, MAX_AGENTS, SENSOR_RADIUS, WORLD_SIZE } from "./config";
 import { NUM_CELLS } from "./simulationPolicy";
@@ -33,13 +32,6 @@ describe("initial simulation packing", () => {
     expect(denseU[lastLive * 4 + 2]).toBe(lastLive);
   });
 
-  it("initializes indirect draw args for zero-step render frames", () => {
-    const indirect = new ArrayBuffer(DRAW_INDIRECT_BYTES);
-
-    writeInitialIndirect(indirect);
-
-    expect(Array.from(new Uint32Array(indirect))).toEqual([3, initialAliveCount(), 0, 0]);
-  });
 });
 
 describe("simulation params packing", () => {

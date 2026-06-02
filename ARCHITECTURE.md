@@ -15,7 +15,7 @@ behavioral *content* of the simulation is deliberately out of scope here.
   timestamp, never a synchronous stall.
 - Single code path. The WebGPU `timestamp-query` feature is **required** (there is
   no blind fallback); the app refuses to start without it.
-- The neural simulation compute bind group requires at least 12 storage buffers
+- The neural simulation compute bind group requires at least 11 storage buffers
   per shader stage, so device creation requests `maxStorageBuffersPerShaderStage`
   above the WebGPU default limit.
 
@@ -69,13 +69,13 @@ behavioral *content* of the simulation is deliberately out of scope here.
 - `src/simulationShader.ts` contains the WGSL kernels for fixed-capacity agent
   slots, neural-network movement, circular hitbox collision deaths, head-on
   breeding, genetic crossover/mutation, random immigrants, and the counting-sort
-  neighbor index (`dense` + `cellStart`).
+  neighbor index (`dense` + `cellStart`) used by sensing and collision.
 - `src/simulationPacking.ts` owns CPU-side parameter and initial-buffer packing.
 - `src/simulationPolicy.ts` holds pure, tested policy invariants for sensing,
   collision broadphase bounds, and demographic slot allocation.
-- `src/renderer.ts` renders agents as direction-facing HSV triangles into the
-  swapchain texture, tiled across camera-provided offsets to visualize torus
-  wrapping.
+- `src/renderer.ts` renders fixed agent slots as direction-facing HSV triangles
+  into the swapchain texture, with dead slots discarded in the vertex shader and
+  torus tile copies drawn through instancing.
 - `src/layout.ts` centralizes GPU buffer-layout constants and WGSL structs shared
   by simulation and rendering.
 - `src/spatial.ts`, `src/collision.ts`, `src/genetics.ts`, and `src/camera.ts`
@@ -203,8 +203,8 @@ degradation smooth (steps spread across multiple frames).
 - **Compact agent slots:** one fixed-size `Agent` storage buffer holds the small
   per-agent state used by both simulation and rendering. Neural genomes, planned
   movement, collision marks, and birth events live in separate fixed-size storage
-  buffers so the render-facing agent layout stays small. Shared WGSL snippets and
-  layout tests keep the CPU/GPU contract explicit.
+  buffers. Shared WGSL snippets and layout tests keep the CPU/GPU contract
+  explicit.
 - **Fixed-capacity buffers:** population capacity is fixed (no GPU allocation
   churn), which keeps per-step cost stable and predictable for the controller.
   If a head-on birth happens while no free slot exists, one random parent slot is
@@ -248,33 +248,31 @@ index.
    planned next position/direction/speed.
 4. **Collision choice:** agents compare planned circular hitboxes in nearby
    cells. Side/back impacts mark the hitter for death; reciprocal head-on choices
-   become birth events.
-5. **Death commit:** killed agents are cleared and survivors commit planned
-   movement.
-6. **Fresh free-list rebuild:** the index/free-list is rebuilt so same-step
-   deaths are available to childbirth.
-7. **Childbirth:** birth events write crossover/mutated children into free slots
-   or randomly overwrite one parent if capacity is full.
-8. **Population replenishment:** after another free-list rebuild, random
-   immigrants fill remaining free slots until the population floor is reached.
+   record mate targets.
+5. **Contact commit:** reciprocal mate targets become birth events, killed agents
+   are cleared and appended directly to the free list, and survivors commit
+   planned movement.
+6. **Childbirth:** birth events consume free-list slots already known from the
+   population scan plus same-step deaths, or randomly overwrite one parent if
+   capacity is full.
+7. **Population replenishment:** random immigrants consume remaining free-list
+   slots until the population floor is reached.
 
-After the step batch, the cell index is rebuilt once more and `writeIndirect`
-copies the final live count into draw args, so the render pass sees the final
-post-birth/post-death/post-immigrant state.
+The step batch does not rebuild a final render index. Rendering reads fixed
+agent slots directly, so the last simulation step's post-birth/post-death state
+is visible without a post-batch counting sort.
 
 ## Render path
 
-- Reads simulation state directly after the sim passes in the same submission.
-- Exact render representation (draw agents directly vs. a derived field/instance
-  buffer) is **deferred**; it slots into the render portion of the frame without
-  changing the loop or the controller, since its cost is just part of the measured
-  frame.
+- Reads fixed-slot simulation state directly after the sim passes in the same
+  submission.
+- Draws one instanced border call and one instanced agent call for all visible
+  torus tiles. Dead agent slots emit degenerate offscreen triangles in the vertex
+  shader, avoiding a live-only render compaction pass.
 - Render/world coordinate spaces are separate; resize affects rendering only.
 
 ## Deferred / open items
 
-- **Render representation details** (#5 from discussion): decided later with sim
-  content.
 - **Indirect dispatch / fewer passes per step:** optional future optimization if
   CPU encoding becomes the dominant cost again at much higher step counts.
 - **Simulation behavioral content:** entirely out of scope for this document.

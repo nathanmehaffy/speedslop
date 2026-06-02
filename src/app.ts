@@ -28,8 +28,6 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     device,
     format,
     simulation.agentsBuffer,
-    simulation.denseBuffer,
-    simulation.indirectBuffer,
   );
   const controller = new ThroughputController();
   const profiler = new GpuProfiler(device);

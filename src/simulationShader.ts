@@ -14,19 +14,14 @@ import { NUM_CELLS, SCAN_CHUNK, SCAN_WORKGROUP_SIZE, SENSOR_CELL_RADIUS, WORKGRO
 
 export const PIPELINE_NAMES = [
   "clearStep",
-  "clearIndex",
-  "clearFreeList",
   "count",
   "scan",
   "scatter",
-  "gatherDead",
   "planMove",
   "chooseContacts",
-  "resolveMates",
-  "commitAgents",
+  "commitContacts",
   "spawnChildren",
   "spawnImmigrants",
-  "writeIndirect",
 ] as const;
 
 export type PipelineName = (typeof PIPELINE_NAMES)[number];
@@ -81,12 +76,11 @@ struct Meta {
 @group(0) @binding(4) var<storage, read_write> cellStart: array<u32>;
 @group(0) @binding(5) var<storage, read_write> dense: array<Dense>;
 @group(0) @binding(6) var<storage, read_write> freeList: array<u32>;
-@group(0) @binding(7) var<storage, read_write> indirect: array<u32>;
-@group(0) @binding(8) var<storage, read_write> brains: array<f32>;
-@group(0) @binding(9) var<storage, read_write> planned: array<Planned>;
-@group(0) @binding(10) var<storage, read_write> killMarks: array<atomic<u32>>;
-@group(0) @binding(11) var<storage, read_write> mateTargets: array<u32>;
-@group(0) @binding(12) var<storage, read_write> birthEvents: array<BirthEvent>;
+@group(0) @binding(7) var<storage, read_write> brains: array<f32>;
+@group(0) @binding(8) var<storage, read_write> planned: array<Planned>;
+@group(0) @binding(9) var<storage, read_write> killMarks: array<atomic<u32>>;
+@group(0) @binding(10) var<storage, read_write> mateTargets: array<u32>;
+@group(0) @binding(11) var<storage, read_write> birthEvents: array<BirthEvent>;
 
 fn pcg(v: u32) -> u32 {
   var s = v * 747796405u + 2891336453u;
@@ -212,26 +206,6 @@ fn clearStep(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn clearIndex(@builtin(global_invocation_id) gid: vec3u) {
-  let i = gid.x;
-  if (i < params.numCells) {
-    atomicStore(&cellCount[i], 0u);
-  }
-  if (i == 0u) {
-    atomicStore(&globals.freeCount, 0u);
-    atomicStore(&globals.childCount, 0u);
-  }
-}
-
-// Reset just the free-slot/child cursors ahead of a lightweight free-list
-// refresh (no cell histogram involved).
-@compute @workgroup_size(1)
-fn clearFreeList() {
-  atomicStore(&globals.freeCount, 0u);
-  atomicStore(&globals.childCount, 0u);
-}
-
-@compute @workgroup_size(${WORKGROUP_SIZE})
 fn count(@builtin(global_invocation_id) gid: vec3u) {
   let slot = gid.x;
   if (slot >= params.maxAgents) {
@@ -296,21 +270,6 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
   let d = atomicAdd(&cellCount[cellOf(a.pos)], 1u);
   dense[d].pos = a.pos;
   dense[d].slot = slot;
-}
-
-// Rebuild only the dead-slot free list (and free count) without the cell
-// histogram/scatter, for the childbirth and immigration phases that do not read
-// the spatial index. Requires clearFreeList to have reset the cursor first.
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn gatherDead(@builtin(global_invocation_id) gid: vec3u) {
-  let slot = gid.x;
-  if (slot >= params.maxAgents) {
-    return;
-  }
-  if (agents[slot].alive != 1u) {
-    let f = atomicAdd(&globals.freeCount, 1u);
-    freeList[f] = slot;
-  }
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -495,38 +454,27 @@ fn chooseContacts(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn resolveMates(@builtin(global_invocation_id) gid: vec3u) {
+fn commitContacts(@builtin(global_invocation_id) gid: vec3u) {
   let slot = gid.x;
   if (slot >= params.maxAgents) {
     return;
   }
+
   let mate = mateTargets[slot];
-  if (mate == NO_TARGET || slot >= mate) {
-    return;
-  }
-  if (agents[slot].alive != 1u || agents[mate].alive != 1u) {
-    return;
-  }
-  if (atomicLoad(&killMarks[slot]) != 0u || atomicLoad(&killMarks[mate]) != 0u) {
-    return;
-  }
-  if (mateTargets[mate] != slot) {
-    return;
+  if (mate != NO_TARGET) {
+    if (slot < mate) {
+      let slotAliveForBirth = atomicLoad(&killMarks[slot]) == 0u;
+      let mateAliveForBirth = atomicLoad(&killMarks[mate]) == 0u;
+      if (slotAliveForBirth && mateAliveForBirth && mateTargets[mate] == slot) {
+        let e = atomicAdd(&globals.birthCount, 1u);
+        if (e < params.maxAgents) {
+          birthEvents[e].parentA = slot;
+          birthEvents[e].parentB = mate;
+        }
+      }
+    }
   }
 
-  let e = atomicAdd(&globals.birthCount, 1u);
-  if (e < params.maxAgents) {
-    birthEvents[e].parentA = slot;
-    birthEvents[e].parentB = mate;
-  }
-}
-
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn commitAgents(@builtin(global_invocation_id) gid: vec3u) {
-  let slot = gid.x;
-  if (slot >= params.maxAgents) {
-    return;
-  }
   var a = agents[slot];
   if (a.alive != 1u) {
     return;
@@ -534,6 +482,8 @@ fn commitAgents(@builtin(global_invocation_id) gid: vec3u) {
   if (atomicLoad(&killMarks[slot]) != 0u) {
     a.alive = 0u;
     agents[slot] = a;
+    let f = atomicAdd(&globals.freeCount, 1u);
+    freeList[f] = slot;
     return;
   }
 
@@ -606,28 +556,21 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn spawnImmigrants(@builtin(global_invocation_id) gid: vec3u) {
   let t = gid.x;
-  // Live count is implied by the free list: every slot is either alive or free.
-  let live = params.maxAgents - atomicLoad(&globals.freeCount);
+  let freeCount = atomicLoad(&globals.freeCount);
+  let consumedByChildren = min(atomicLoad(&globals.childCount), freeCount);
+  let remainingFree = freeCount - consumedByChildren;
+  let live = params.maxAgents - remainingFree;
   if (live >= params.populationFloor) {
     return;
   }
-  let needed = min(params.populationFloor - live, atomicLoad(&globals.freeCount));
+  let needed = min(params.populationFloor - live, remainingFree);
   if (t >= needed) {
     return;
   }
 
-  let slot = freeList[t];
+  let slot = freeList[consumedByChildren + t];
   let seed = hash2(slot ^ globals.step, 0xdeadbeefu ^ t);
   agents[slot] = spawnRandomAgent(slot, seed);
   writeRandomBrain(slot, seed);
-}
-
-@compute @workgroup_size(1)
-fn writeIndirect() {
-  let live = atomicLoad(&globals.denseCount);
-  indirect[0] = 3u; // vertices per agent triangle
-  indirect[1] = live; // instance count
-  indirect[2] = 0u;
-  indirect[3] = 0u;
 }
 `;

@@ -6,7 +6,7 @@ export interface GpuContext {
   format: GPUTextureFormat;
 }
 
-const REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE = 12;
+const REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE = 11;
 
 export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
   if (!navigator.gpu) {

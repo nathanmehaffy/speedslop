@@ -9,9 +9,10 @@ export const MAX_DEVICE_PIXEL_RATIO = 2;
 // floats below it through collision deaths and childbirth.
 export const MAX_AGENTS = 10_000;
 
-// Spatial grid resolution per axis. GRID_DIM^2 cells tile the world; sized so
-// cell width stays stable when WORLD_SIZE changes.
-export const GRID_DIM = 256;
+// Spatial grid resolution per axis. GRID_DIM^2 cells tile the world. The
+// current value keeps average cell occupancy near one at full population while
+// avoiding a large empty-cell scan tax.
+export const GRID_DIM = 96;
 
 // Torus world extent per axis (16x the original unit-square area).
 export const WORLD_SIZE = 4;

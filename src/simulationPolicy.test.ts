@@ -12,7 +12,7 @@ import {
 describe("sensor policy", () => {
   it("scans enough neighboring cells for the configured sensor radius", () => {
     expect(SENSOR_CELL_RADIUS).toBe(sensorCellRadius(SENSOR_RADIUS, CELL_WIDTH));
-    expect(SENSOR_CELL_RADIUS).toBeGreaterThanOrEqual(2);
+    expect(SENSOR_CELL_RADIUS).toBe(1);
   });
 
   it("filters candidates by actual sensor distance", () => {

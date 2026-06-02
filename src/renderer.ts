@@ -1,18 +1,21 @@
 // Renderer for the torus agent world.
 //
-// Agents are drawn as direction-facing, HSV-coloured triangles via an indirect
-// draw whose instance count is the GPU-resident live count (no readback). The
-// world is the unit square; to visualise the torus wrapping it is tiled across
-// the visible viewport, and each tile gets a thin grey border. Pan/zoom come
-// from the pure `Camera`; the renderer only consumes the resulting transform.
+// Agents are drawn directly from fixed simulation slots as direction-facing,
+// HSV-coloured triangles. Dead slots emit degenerate offscreen triangles, which
+// is cheaper than rebuilding a live-only render index after every sim batch.
+// Torus tile copies are rendered with instancing so zoomed-out views do not
+// multiply draw calls.
 
-import { AGENT_TRIANGLE_SIZE, BORDER_COLOR, CLEAR_COLOR, WORLD_SIZE } from "./config";
+import { AGENT_TRIANGLE_SIZE, BORDER_COLOR, CLEAR_COLOR, MAX_AGENTS, WORLD_SIZE } from "./config";
 import { MAX_VISIBLE_TILES, type TileOffset } from "./camera";
-import { AGENT_STRUCT_WGSL, DENSE_STRUCT_WGSL } from "./layout";
+import { AGENT_STRUCT_WGSL } from "./layout";
 
-const TILE_STRIDE = 256; // min uniform buffer dynamic-offset alignment
+const TILE_BYTES = 16;
+const TILE_F32 = TILE_BYTES / 4;
 
 const SHADER = /* wgsl */ `
+const MAX_AGENTS: u32 = ${MAX_AGENTS}u;
+
 struct Camera {
   center: vec2f,
   scale: vec2f,
@@ -25,12 +28,10 @@ struct Tile {
 }
 
 ${AGENT_STRUCT_WGSL}
-${DENSE_STRUCT_WGSL}
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> tile: Tile;
+@group(0) @binding(1) var<storage, read> tiles: array<Tile>;
 @group(0) @binding(2) var<storage, read> agents: array<Agent>;
-@group(0) @binding(3) var<storage, read> dense: array<Dense>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -58,7 +59,16 @@ fn toClip(world: vec2f) -> vec4f {
 
 @vertex
 fn vsAgent(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
-  let a = agents[dense[ii].slot];
+  let tileIndex = ii / MAX_AGENTS;
+  let slot = ii - tileIndex * MAX_AGENTS;
+  let a = agents[slot];
+  if (a.alive != 1u) {
+    var dead: VSOut;
+    dead.pos = vec4f(2.0, 2.0, 0.0, 1.0);
+    dead.color = vec3f(0.0);
+    return dead;
+  }
+
   let s = camera.triSize;
   var local = array<vec2f, 3>(
     vec2f(s, 0.0),
@@ -69,7 +79,7 @@ fn vsAgent(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
   let c = cos(a.dir);
   let sn = sin(a.dir);
   let rotated = vec2f(lv.x * c - lv.y * sn, lv.x * sn + lv.y * c);
-  let world = a.pos + tile.offset + rotated;
+  let world = a.pos + tiles[tileIndex].offset + rotated;
 
   var out: VSOut;
   out.pos = toClip(world);
@@ -78,7 +88,7 @@ fn vsAgent(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 }
 
 @vertex
-fn vsBorder(@builtin(vertex_index) vi: u32) -> VSOut {
+fn vsBorder(@builtin(vertex_index) vi: u32, @builtin(instance_index) tileIndex: u32) -> VSOut {
   let w = f32(${WORLD_SIZE});
   var corners = array<vec2f, 8>(
     vec2f(0.0, 0.0), vec2f(w, 0.0),
@@ -87,7 +97,7 @@ fn vsBorder(@builtin(vertex_index) vi: u32) -> VSOut {
     vec2f(0.0, w), vec2f(0.0, 0.0),
   );
   var out: VSOut;
-  out.pos = toClip(corners[vi] + tile.offset);
+  out.pos = toClip(corners[vi] + tiles[tileIndex].offset);
   out.color = vec3f(${BORDER_COLOR[0]}, ${BORDER_COLOR[1]}, ${BORDER_COLOR[2]});
   return out;
 }
@@ -105,7 +115,6 @@ export class Renderer {
   private readonly cameraBuffer: GPUBuffer;
   private readonly tileBuffer: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
-  private readonly indirect: GPUBuffer;
   private readonly tileScratch: Uint8Array<ArrayBuffer>;
   private readonly cameraScratch = new Float32Array(8);
 
@@ -115,11 +124,8 @@ export class Renderer {
     device: GPUDevice,
     format: GPUTextureFormat,
     agents: GPUBuffer,
-    dense: GPUBuffer,
-    indirect: GPUBuffer,
   ) {
     this.device = device;
-    this.indirect = indirect;
 
     this.cameraBuffer = device.createBuffer({
       size: 32,
@@ -127,30 +133,24 @@ export class Renderer {
       label: "camera",
     });
     this.tileBuffer = device.createBuffer({
-      size: MAX_VISIBLE_TILES * TILE_STRIDE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size: MAX_VISIBLE_TILES * TILE_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       label: "tiles",
     });
 
     const layout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 16 },
-        },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
       ],
     });
     this.bindGroup = device.createBindGroup({
       layout,
       entries: [
         { binding: 0, resource: { buffer: this.cameraBuffer } },
-        { binding: 1, resource: { buffer: this.tileBuffer, size: 16 } },
+        { binding: 1, resource: { buffer: this.tileBuffer } },
         { binding: 2, resource: { buffer: agents } },
-        { binding: 3, resource: { buffer: dense } },
       ],
     });
 
@@ -168,7 +168,7 @@ export class Renderer {
       fragment: { module, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "line-list" },
     });
-    this.tileScratch = new Uint8Array(new ArrayBuffer(MAX_VISIBLE_TILES * TILE_STRIDE));
+    this.tileScratch = new Uint8Array(new ArrayBuffer(MAX_VISIBLE_TILES * TILE_BYTES));
   }
 
   /** Update the camera transform and the per-tile offsets for this frame. */
@@ -193,8 +193,8 @@ export class Renderer {
     this.tileCount = offsets.length;
     const view = new Float32Array(this.tileScratch.buffer);
     for (let i = 0; i < this.tileCount; i += 1) {
-      view[(i * TILE_STRIDE) / 4 + 0] = offsets[i][0];
-      view[(i * TILE_STRIDE) / 4 + 1] = offsets[i][1];
+      view[i * TILE_F32 + 0] = offsets[i][0];
+      view[i * TILE_F32 + 1] = offsets[i][1];
     }
     if (this.tileCount > 0) {
       this.device.queue.writeBuffer(
@@ -202,7 +202,7 @@ export class Renderer {
         0,
         this.tileScratch,
         0,
-        this.tileCount * TILE_STRIDE,
+        this.tileCount * TILE_BYTES,
       );
     }
   }
@@ -220,16 +220,11 @@ export class Renderer {
     });
 
     pass.setPipeline(this.borderPipeline);
-    for (let i = 0; i < this.tileCount; i += 1) {
-      pass.setBindGroup(0, this.bindGroup, [i * TILE_STRIDE]);
-      pass.draw(8, 1);
-    }
+    pass.setBindGroup(0, this.bindGroup);
+    pass.draw(8, this.tileCount);
 
     pass.setPipeline(this.agentPipeline);
-    for (let i = 0; i < this.tileCount; i += 1) {
-      pass.setBindGroup(0, this.bindGroup, [i * TILE_STRIDE]);
-      pass.drawIndirect(this.indirect, 0);
-    }
+    pass.draw(3, MAX_AGENTS * this.tileCount);
 
     pass.end();
   }

@@ -9,7 +9,6 @@ import {
   AGENT_BYTES,
   BIRTH_EVENT_BYTES,
   DENSE_BYTES,
-  DRAW_INDIRECT_BYTES,
   PLANNED_BYTES,
   SIM_PARAMS_BYTES,
 } from "./layout";
@@ -19,7 +18,6 @@ import {
   writeInitialAgents,
   writeInitialBrains,
   writeInitialDense,
-  writeInitialIndirect,
 } from "./simulationPacking";
 import { assertSimulationConfig, NUM_CELLS, WORKGROUP_SIZE } from "./simulationPolicy";
 import { PIPELINE_NAMES, SHADER, type PipelineName } from "./simulationShader";
@@ -33,7 +31,6 @@ export class Simulation {
   private readonly pipelines: Record<PipelineName, GPUComputePipeline>;
   private readonly agents: GPUBuffer;
   private readonly dense: GPUBuffer;
-  private readonly indirect: GPUBuffer;
 
   private readonly clearWorkgroups: number;
   private readonly agentWorkgroups: number;
@@ -88,14 +85,6 @@ export class Simulation {
       usage: storage,
       label: "birth-events",
     });
-    this.indirect = device.createBuffer({
-      size: DRAW_INDIRECT_BYTES,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE,
-      mappedAtCreation: true,
-      label: "draw-indirect",
-    });
-    writeInitialIndirect(this.indirect.getMappedRange());
-    this.indirect.unmap();
 
     const paramsBuffer = device.createBuffer({
       size: SIM_PARAMS_BYTES,
@@ -107,7 +96,7 @@ export class Simulation {
     const layout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        ...Array.from({ length: 12 }, (_, i) => i + 1).map((binding) => ({
+        ...Array.from({ length: 11 }, (_, i) => i + 1).map((binding) => ({
           binding,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "storage" as const },
@@ -125,12 +114,11 @@ export class Simulation {
         { binding: 4, resource: { buffer: cellStart } },
         { binding: 5, resource: { buffer: this.dense } },
         { binding: 6, resource: { buffer: freeList } },
-        { binding: 7, resource: { buffer: this.indirect } },
-        { binding: 8, resource: { buffer: brains } },
-        { binding: 9, resource: { buffer: planned } },
-        { binding: 10, resource: { buffer: killMarks } },
-        { binding: 11, resource: { buffer: mateTargets } },
-        { binding: 12, resource: { buffer: birthEvents } },
+        { binding: 7, resource: { buffer: brains } },
+        { binding: 8, resource: { buffer: planned } },
+        { binding: 9, resource: { buffer: killMarks } },
+        { binding: 10, resource: { buffer: mateTargets } },
+        { binding: 11, resource: { buffer: birthEvents } },
       ],
     });
 
@@ -143,18 +131,9 @@ export class Simulation {
     ) as Record<PipelineName, GPUComputePipeline>;
   }
 
-  /** Latest live-agent state, addressed by dense index -> slot. */
+  /** Latest fixed-slot agent state. */
   get agentsBuffer(): GPUBuffer {
     return this.agents;
-  }
-
-  get denseBuffer(): GPUBuffer {
-    return this.dense;
-  }
-
-  /** Draw-indirect args (vertexCount=3, instanceCount=liveCount). */
-  get indirectBuffer(): GPUBuffer {
-    return this.indirect;
   }
 
   /** Encode `steps` dependent simulation steps into a single compute pass. */
@@ -172,41 +151,20 @@ export class Simulation {
     // WebGPU orders dispatches in one compute pass; each pass sees prior storage writes.
     for (let i = 0; i < steps; i += 1) {
       this.dispatch(pass, "clearStep", this.clearWorkgroups);
-      this.rebuildIndex(pass, true);
+      this.rebuildIndex(pass);
       this.dispatch(pass, "planMove", this.agentWorkgroups);
       this.dispatch(pass, "chooseContacts", this.agentWorkgroups);
-      this.dispatch(pass, "resolveMates", this.agentWorkgroups);
-      this.dispatch(pass, "commitAgents", this.agentWorkgroups);
-
-      // Childbirth and immigration only need a fresh free list plus the live
-      // count (maxAgents - freeCount); they never read the cell index, so a
-      // lightweight free-list refresh replaces a full counting-sort rebuild.
-      this.refreshFreeList(pass);
+      this.dispatch(pass, "commitContacts", this.agentWorkgroups);
       this.dispatch(pass, "spawnChildren", this.agentWorkgroups);
-
-      this.refreshFreeList(pass);
       this.dispatch(pass, "spawnImmigrants", this.agentWorkgroups);
     }
-
-    // Rebuild the live index once after the batch so render sees final state and
-    // the indirect draw count is current.
-    this.rebuildIndex(pass, false);
-    this.dispatch(pass, "writeIndirect", 1);
     pass.end();
   }
 
-  private rebuildIndex(pass: GPUComputePassEncoder, afterClearStep: boolean): void {
-    if (!afterClearStep) {
-      this.dispatch(pass, "clearIndex", this.clearWorkgroups);
-    }
+  private rebuildIndex(pass: GPUComputePassEncoder): void {
     this.dispatch(pass, "count", this.agentWorkgroups);
     this.dispatch(pass, "scan", 1);
     this.dispatch(pass, "scatter", this.agentWorkgroups);
-  }
-
-  private refreshFreeList(pass: GPUComputePassEncoder): void {
-    this.dispatch(pass, "clearFreeList", 1);
-    this.dispatch(pass, "gatherDead", this.agentWorkgroups);
   }
 
   private dispatch(pass: GPUComputePassEncoder, name: PipelineName, workgroups: number): void {

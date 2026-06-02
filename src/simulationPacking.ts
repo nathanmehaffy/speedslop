@@ -19,7 +19,7 @@ import {
   WORLD_SIZE,
   AGENT_HIT_RADIUS,
 } from "./config";
-import { AGENT_F32, DRAW_INDIRECT_BYTES, SIM_PARAMS_BYTES } from "./layout";
+import { AGENT_F32, SIM_PARAMS_BYTES } from "./layout";
 import { NUM_CELLS } from "./simulationPolicy";
 
 export const BRAIN_BYTES = BRAIN_WEIGHT_COUNT * 4;
@@ -138,11 +138,4 @@ export function writeInitialDense(
     denseU[denseBase + 2] = slot;
     denseU[denseBase + 3] = 0;
   }
-}
-
-export function writeInitialIndirect(range: ArrayBuffer, liveCount: number = initialAliveCount()): void {
-  if (range.byteLength < DRAW_INDIRECT_BYTES) {
-    throw new Error("draw indirect buffer range is too small");
-  }
-  new Uint32Array(range).set([3, liveCount, 0, 0]);
 }
