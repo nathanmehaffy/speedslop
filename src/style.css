@@ -19,13 +19,32 @@ body {
   left: 12px;
   z-index: 1;
   padding: 6px 10px;
-  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #c8d4e8;
   background: rgba(5, 8, 16, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   pointer-events: none;
   user-select: none;
+  white-space: pre;
+}
+
+#error-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  max-width: min(520px, calc(100% - 24px));
+  padding: 10px 12px;
+  font: 13px/1.4 system-ui, sans-serif;
+  color: #ffe3e3;
+  background: rgba(84, 10, 20, 0.9);
+  border: 1px solid rgba(255, 168, 168, 0.45);
+  border-radius: 8px;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 #canvas {

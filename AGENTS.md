@@ -6,6 +6,19 @@ This is a greenfield project. Backwards compatibility, fallbacks, and old runtim
 
 Critical code pathways should be extensively tested as the simulation grows, especially invariants and GPU data layout assumptions.
 
+## Project Structure
+
+See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the current implementation:
+
+- `src/main.ts` handles DOM lookup and fatal-error display.
+- `src/app.ts` owns the `requestAnimationFrame` loop and wires together GPU setup, simulation, rendering, throughput control, and the small fps/steps monitor.
+- `src/gpu.ts` initializes WebGPU, resizes the canvas, and installs GPU error handlers.
+- `src/simulation.ts` contains the simple deterministic demo simulation and GPU buffers.
+- `src/renderer.ts` renders the simulation state.
+- `src/controller.ts` is the pure, tested blind throughput controller.
+- `src/telemetry.ts` formats the lightweight on-screen monitor.
+- `src/config.ts` centralizes small runtime constants.
+
 ## Development Commands
 
 Run from the repository root:
