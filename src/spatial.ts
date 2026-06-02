@@ -4,13 +4,7 @@
 // TypeScript reference lets cell indexing, toroidal distance, and population
 // target math be checked without a GPU.
 
-import {
-  GRID_DIM,
-  POPULATION_AMPLITUDE,
-  POPULATION_MID,
-  POPULATION_OMEGA,
-  WORLD_SIZE,
-} from "./config";
+import { GRID_DIM, WORLD_SIZE } from "./config";
 
 /** Grid cell index for a world position, clamped into `[0, dim)` per axis. */
 export function cellIndex(x: number, y: number, dim: number = GRID_DIM): number {
@@ -37,11 +31,6 @@ export function toroidalDistanceSq(
   const dx = toroidalDelta(ax, bx, size);
   const dy = toroidalDelta(ay, by, size);
   return dx * dx + dy * dy;
-}
-
-/** Target live population for a given step (sine wave around the midpoint). */
-export function populationTarget(step: number): number {
-  return POPULATION_MID + POPULATION_AMPLITUDE * Math.sin(step * POPULATION_OMEGA);
 }
 
 function clampCell(c: number, dim: number): number {

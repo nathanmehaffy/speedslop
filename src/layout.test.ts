@@ -1,17 +1,35 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_HIT_RADIUS,
+  AGENT_MAX_SPEED,
+  AGENT_MAX_TURN,
+  AGENT_MIN_SPEED,
+  BRAIN_WEIGHT_COUNT,
+  CONTACT_DOT,
   GRID_DIM,
-  HEADING_JITTER,
-  HUE_DRIFT,
+  HEAD_ON_DOT,
+  HUE_MUTATION_SCALE,
   MAX_AGENTS,
-  POPULATION_AMPLITUDE,
-  POPULATION_MID,
-  POPULATION_OMEGA,
+  MUTATION_RATE,
+  MUTATION_SCALE,
+  MUTATION_WEIGHT_LIMIT,
+  NEURAL_NEIGHBORS,
+  SENSOR_RADIUS,
+  SPEED_MUTATION_SCALE,
   STEP_DT,
   WORLD_SIZE,
 } from "./config";
-import { AGENT_BYTES, AGENT_F32, DENSE_BYTES, DRAW_INDIRECT_BYTES, SIM_PARAMS_BYTES } from "./layout";
+import {
+  AGENT_BYTES,
+  AGENT_F32,
+  BIRTH_EVENT_BYTES,
+  DENSE_BYTES,
+  DRAW_INDIRECT_BYTES,
+  PLANNED_BYTES,
+  PLANNED_F32,
+  SIM_PARAMS_BYTES,
+} from "./layout";
 import { buildSimulationParams } from "./simulation";
 
 const NUM_CELLS = GRID_DIM * GRID_DIM;
@@ -20,6 +38,9 @@ describe("GPU layout contracts", () => {
   it("keeps buffer strides aligned with the WGSL structs", () => {
     expect(AGENT_F32).toBe(10);
     expect(AGENT_BYTES).toBe(40);
+    expect(PLANNED_F32).toBe(4);
+    expect(PLANNED_BYTES).toBe(16);
+    expect(BIRTH_EVENT_BYTES).toBe(8);
     expect(DENSE_BYTES).toBe(16);
     expect(DRAW_INDIRECT_BYTES).toBe(16);
   });
@@ -31,15 +52,25 @@ describe("GPU layout contracts", () => {
     const f = new Float32Array(params);
     const u = new Uint32Array(params);
     expect(f[0]).toBeCloseTo(STEP_DT);
-    expect(f[1]).toBeCloseTo(HEADING_JITTER);
-    expect(f[2]).toBeCloseTo(HUE_DRIFT);
-    expect(f[3]).toBeCloseTo(WORLD_SIZE);
-    expect(f[4]).toBeCloseTo(POPULATION_MID);
-    expect(f[5]).toBeCloseTo(POPULATION_AMPLITUDE);
-    expect(f[6]).toBeCloseTo(POPULATION_OMEGA);
-    expect(u[9]).toBe(MAX_AGENTS);
-    expect(u[10]).toBe(GRID_DIM);
-    expect(u[11]).toBe(NUM_CELLS);
+    expect(f[1]).toBeCloseTo(WORLD_SIZE);
+    expect(f[2]).toBeCloseTo(AGENT_HIT_RADIUS);
+    expect(f[3]).toBeCloseTo((AGENT_HIT_RADIUS * 2) ** 2);
+    expect(f[4]).toBeCloseTo(CONTACT_DOT);
+    expect(f[5]).toBeCloseTo(HEAD_ON_DOT);
+    expect(f[6]).toBeCloseTo(AGENT_MAX_TURN);
+    expect(f[7]).toBeCloseTo(AGENT_MIN_SPEED);
+    expect(f[8]).toBeCloseTo(AGENT_MAX_SPEED);
+    expect(f[9]).toBeCloseTo(MUTATION_RATE);
+    expect(f[10]).toBeCloseTo(MUTATION_SCALE);
+    expect(f[11]).toBeCloseTo(MUTATION_WEIGHT_LIMIT);
+    expect(f[12]).toBeCloseTo(SPEED_MUTATION_SCALE);
+    expect(f[13]).toBeCloseTo(HUE_MUTATION_SCALE);
+    expect(f[14]).toBeCloseTo(SENSOR_RADIUS);
+    expect(u[16]).toBe(MAX_AGENTS);
+    expect(u[17]).toBe(GRID_DIM);
+    expect(u[18]).toBe(NUM_CELLS);
+    expect(u[19]).toBe(NEURAL_NEIGHBORS);
+    expect(u[20]).toBe(BRAIN_WEIGHT_COUNT);
   });
 
   it("keeps the grid compatible with the single-workgroup prefix scan", () => {

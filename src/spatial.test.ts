@@ -1,12 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  POPULATION_AMPLITUDE,
-  POPULATION_MID,
-  POPULATION_OMEGA,
-  WORLD_SIZE,
-} from "./config";
-import { cellIndex, populationTarget, toroidalDelta, toroidalDistanceSq } from "./spatial";
+import { WORLD_SIZE } from "./config";
+import { cellIndex, toroidalDelta, toroidalDistanceSq } from "./spatial";
 
 describe("cellIndex", () => {
   it("maps the origin to cell 0", () => {
@@ -52,21 +47,3 @@ describe("toroidalDistanceSq", () => {
   });
 });
 
-describe("populationTarget", () => {
-  it("equals the midpoint at step 0", () => {
-    expect(populationTarget(0)).toBeCloseTo(POPULATION_MID, 9);
-  });
-
-  it("peaks a quarter period in", () => {
-    const quarter = Math.PI / 2 / POPULATION_OMEGA;
-    expect(populationTarget(quarter)).toBeCloseTo(POPULATION_MID + POPULATION_AMPLITUDE, 6);
-  });
-
-  it("stays within the amplitude band", () => {
-    for (let step = 0; step < 10_000; step += 137) {
-      const p = populationTarget(step);
-      expect(p).toBeGreaterThanOrEqual(POPULATION_MID - POPULATION_AMPLITUDE - 1e-6);
-      expect(p).toBeLessThanOrEqual(POPULATION_MID + POPULATION_AMPLITUDE + 1e-6);
-    }
-  });
-});

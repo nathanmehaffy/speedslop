@@ -6,7 +6,7 @@ export const MAX_DEVICE_PIXEL_RATIO = 2;
 // Simulation ---------------------------------------------------------------
 
 // Fixed agent capacity. Every buffer is sized for this many slots; population
-// floats below it (see population sine params).
+// floats below it through collision deaths and childbirth.
 export const MAX_AGENTS = 10_000;
 
 // Spatial grid resolution per axis. GRID_DIM^2 cells tile the unit world; sized
@@ -16,16 +16,40 @@ export const GRID_DIM = 64;
 // The world is the unit square, wrapped at the edges (a torus).
 export const WORLD_SIZE = 1;
 
-// Population sine wave: live count hovers around POPULATION_MID and swings by
-// POPULATION_AMPLITUDE with angular frequency POPULATION_OMEGA (radians/step).
-export const POPULATION_MID = MAX_AGENTS / 2;
-export const POPULATION_AMPLITUDE = MAX_AGENTS * 0.25;
-export const POPULATION_OMEGA = 0.001;
-
-// Per-step random-walk magnitudes for the placeholder (no brain yet).
-export const HEADING_JITTER = 0.15; // radians of random turn per step
-export const HUE_DRIFT = 0.002; // hue increment per step (rainbow cycling)
+// Initial random population. After startup, births and deaths come from agent
+// interactions rather than global demographic churn.
+export const INITIAL_AGENTS = MAX_AGENTS / 2;
 export const STEP_DT = 1.0;
+
+// Collision ---------------------------------------------------------------
+
+// Hitboxes are circles in world space. The radius and max speed are sized so a
+// one-cell broadphase neighborhood is enough at the default grid resolution.
+export const AGENT_HIT_RADIUS = 0.003;
+export const CONTACT_DOT = 0.15;
+export const HEAD_ON_DOT = 0.65;
+
+// Neural control -----------------------------------------------------------
+
+export const NEURAL_NEIGHBORS = 4;
+export const NEURAL_NEIGHBOR_INPUTS = 6;
+export const NEURAL_SELF_INPUTS = 3;
+export const NEURAL_INPUTS = NEURAL_SELF_INPUTS + NEURAL_NEIGHBORS * NEURAL_NEIGHBOR_INPUTS;
+export const NEURAL_HIDDEN = 8;
+export const NEURAL_OUTPUTS = 2;
+export const BRAIN_WEIGHT_COUNT = NEURAL_INPUTS * NEURAL_HIDDEN + NEURAL_HIDDEN * NEURAL_OUTPUTS;
+
+export const AGENT_MIN_SPEED = 0.0005;
+export const AGENT_MAX_SPEED = 0.004;
+export const AGENT_MAX_TURN = 0.2;
+export const SENSOR_RADIUS = 0.035;
+
+// Genetic mutation tuning.
+export const MUTATION_RATE = 0.03;
+export const MUTATION_SCALE = 0.12;
+export const MUTATION_WEIGHT_LIMIT = 2.5;
+export const SPEED_MUTATION_SCALE = 0.0004;
+export const HUE_MUTATION_SCALE = 0.04;
 
 // Rendering ----------------------------------------------------------------
 

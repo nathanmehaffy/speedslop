@@ -15,6 +15,9 @@ behavioral *content* of the simulation is deliberately out of scope here.
   timestamp, never a synchronous stall.
 - Single code path. The WebGPU `timestamp-query` feature is **required** (there is
   no blind fallback); the app refuses to start without it.
+- The neural simulation compute bind group requires at least 12 storage buffers
+  per shader stage, so device creation requests `maxStorageBuffersPerShaderStage`
+  above the WebGPU default limit.
 
 ## Core constraints that shape everything
 
@@ -62,15 +65,17 @@ behavioral *content* of the simulation is deliberately out of scope here.
 - `src/gpu.ts` contains WebGPU adapter/device/context setup, canvas resizing, and
   device-loss/error hooks.
 - `src/simulation.ts` is the torus agent simulation and its GPU buffers/pipelines:
-  fixed-capacity agent slots, random rainbow movement, GPU-side births/deaths
-  that sine-wave population around half capacity, and a per-step counting-sort
-  that builds the cell-sorted neighbor index (`dense` + `cellStart`).
+  fixed-capacity agent slots, neural-network movement, circular hitbox
+  collision deaths, head-on breeding, genetic crossover/mutation, and a
+  per-step counting-sort that builds the cell-sorted neighbor index (`dense` +
+  `cellStart`).
 - `src/renderer.ts` renders agents as direction-facing HSV triangles into the
   swapchain texture, tiled across the viewport to visualize torus wrapping.
 - `src/layout.ts` centralizes GPU buffer-layout constants and WGSL structs shared
   by simulation and rendering.
-- `src/spatial.ts` and `src/camera.ts` are pure, unit-tested math modules (grid /
-  toroidal-distance / population target, and the pan/zoom camera) with no GPU
+- `src/spatial.ts`, `src/collision.ts`, `src/genetics.ts`, and `src/camera.ts`
+  are pure, unit-tested modules for grid/toroidal math, collision
+  classification, genome contracts, and the pan/zoom camera with no GPU
   dependencies.
 - `src/profiler.ts` owns the `timestamp-query` set, resolves the per-frame GPU
   timestamps, and reads the elapsed time back through a non-blocking pipelined
@@ -191,14 +196,17 @@ degradation smooth (steps spread across multiple frames).
 ## Simulation data model
 
 - **Compact agent slots:** one fixed-size `Agent` storage buffer holds the small
-  per-agent state used by both simulation and rendering. Shared WGSL snippets and
+  per-agent state used by both simulation and rendering. Neural genomes, planned
+  movement, collision marks, and birth events live in separate fixed-size storage
+  buffers so the render-facing agent layout stays small. Shared WGSL snippets and
   layout tests keep the CPU/GPU contract explicit.
 - **Fixed-capacity buffers:** population capacity is fixed (no GPU allocation
   churn), which keeps per-step cost stable and predictable for the controller.
-  Births beyond capacity are dropped (clamp policy).
+  If a head-on birth happens while no free slot exists, one random parent slot is
+  overwritten by the child.
 - **Agent identity:** every agent carries a stable 32-bit ID distinct from its
-  slot index. Initial IDs and newborn IDs are deterministic from slot/step inputs;
-  true lineage semantics are deferred until behavior needs them.
+  slot index. Initial IDs and newborn IDs are deterministic from slot/step
+  inputs; child IDs change when a parent slot is reused.
 - **Counter-based RNG:** stateless PRNG (PCG/Philox-style) keyed by
   `(agent_id, step)`. No stored RNG state to evolve, and deterministic regardless
   of thread scheduling.
@@ -222,21 +230,27 @@ accumulation.
 
 Each simulation step begins with a full cell histogram, prefix scan, and scatter
 that build a query-ready neighbor index (`cellStart` offsets plus cell-sorted
-`dense` with positions). A future sensory/k-nearest pass will read that structure;
-placeholder behavior does not consume it yet.
+`dense` with positions). Neural sensing and collision broadphase both read that
+index.
 
-1. **Grid reset and step bump:** clear cell counters, increment the GPU step
-   counter, reset the free-slot counter.
+1. **Grid/event reset and step bump:** clear cell counters, collision marks,
+   mate targets, birth-event count, and the free-slot counter; increment the GPU
+   step counter.
 2. **Population scan:** histogram live agents by cell, gather dead slots into the
    free list, prefix-sum counts into `cellStart`, scatter into `dense`.
-3. **Demographics:** compute the target population and set spawn/kill amounts
-   from the live count.
-4. **Integration / churn:** live agents random-walk, probabilistic deaths clear
-   live flags, and births fill free slots.
+3. **Neural movement planning:** each live agent scans nearby cells for a fixed
+   number of nearest neighbors, evaluates its compact neural genome, and writes a
+   planned next position/direction/speed.
+4. **Collision choice:** agents compare planned circular hitboxes in nearby
+   cells. Side/back impacts mark the hitter for death; reciprocal head-on choices
+   become birth events.
+5. **Commit and childbirth:** killed agents are cleared, survivors commit planned
+   movement, and birth events write crossover/mutated children into free slots or
+   randomly overwrite one parent if capacity is full.
 
-After the step batch, `writeIndirect` copies the last step's live count into draw
-args. The render pass reuses that step's `dense` list (start-of-last-step layout;
-with many steps per frame the lag is negligible).
+After the step batch, the cell index is rebuilt once more and `writeIndirect`
+copies the final live count into draw args, so the render pass sees the final
+post-birth/post-death state.
 
 ## Render path
 

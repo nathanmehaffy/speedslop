@@ -6,6 +6,8 @@ export interface GpuContext {
   format: GPUTextureFormat;
 }
 
+const REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE = 12;
+
 export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
   if (!navigator.gpu) {
     throw new Error(
@@ -26,7 +28,18 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
     );
   }
 
-  const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
+  if (adapter.limits.maxStorageBuffersPerShaderStage < REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE) {
+    throw new Error(
+      `This GPU/browser supports only ${adapter.limits.maxStorageBuffersPerShaderStage} storage buffers per shader stage; SpeedSlop requires ${REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE} for the neural simulation pipeline.`,
+    );
+  }
+
+  const device = await adapter.requestDevice({
+    requiredFeatures: ["timestamp-query"],
+    requiredLimits: {
+      maxStorageBuffersPerShaderStage: REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE,
+    },
+  });
 
   const context = canvas.getContext("webgpu");
   if (!context) {
