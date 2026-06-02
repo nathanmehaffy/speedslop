@@ -82,13 +82,19 @@ export const DEFAULT_CONFIG: ControllerConfig = {
   recoverFrames: 24,
   recoveryGrowthFactor: 1.08,
   maxPauseDeltaMs: 250,
-  probeFactor: 1.02,
-  probeFrames: 30,
-  probeCooldownFrames: 120,
-  probeMinTrackFrames: 90,
+  // Probes are the only upward path (a vsync-clamped clean frame carries no
+  // headroom information), so they are tuned to compound quickly: a large
+  // multiplicative step behind light gating lets the rate climb back ~100x in a
+  // few hundred frames after headroom suddenly reappears (e.g. zooming back in).
+  // An overshooting probe is reverted on its first dropped frame, so the cost of
+  // an aggressive step is at most a single dropped frame per probe cycle.
+  probeFactor: 1.5,
+  probeFrames: 15,
+  probeCooldownFrames: 30,
+  probeMinTrackFrames: 30,
   probeDropMargin: 0.001,
   probeMaxOverloadScore: 0.5,
-  probeCleanWindows: 3,
+  probeCleanWindows: 1,
 };
 
 export type Phase = "warmup" | "acquire" | "track" | "probe" | "recover";

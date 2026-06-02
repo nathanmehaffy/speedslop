@@ -55,9 +55,16 @@ behavioral *content* of the simulation is deliberately out of scope here.
   lightweight telemetry.
 - `src/gpu.ts` contains WebGPU adapter/device/context setup, canvas resizing, and
   device-loss/error hooks.
-- `src/simulation.ts` contains the current deterministic demo simulation and its
-  GPU buffers/pipelines.
-- `src/renderer.ts` renders the simulation state into the swapchain texture.
+- `src/simulation.ts` is the torus agent simulation and its GPU buffers/pipelines:
+  fixed-capacity agent slots, a per-step counting-sort spatial grid that compacts
+  live agents into a dense cell-sorted array for N-closest queries, an N-nearest
+  sensory gather pass (placeholder brain input), random rainbow movement, and
+  GPU-side births/deaths that sine-wave population around half capacity.
+- `src/renderer.ts` renders agents as direction-facing HSV triangles into the
+  swapchain texture, tiled across the viewport to visualize torus wrapping.
+- `src/spatial.ts` and `src/camera.ts` are pure, unit-tested math modules (grid /
+  toroidal-distance / population target, and the pan/zoom camera) with no GPU
+  dependencies.
 - `src/controller.ts` is a pure, unit-tested throughput controller with no browser
   or GPU dependencies.
 - `src/telemetry.ts` formats the small on-screen fps and sim-steps/sec monitor.

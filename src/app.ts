@@ -1,4 +1,10 @@
-import { CONTROLLER_WARMUP_FRAMES, DEMO_AGENT_COUNT, MAX_DEVICE_PIXEL_RATIO, TELEMETRY_SAMPLE_MS } from "./config";
+import { Camera, type Viewport } from "./camera";
+import {
+  CONTROLLER_WARMUP_FRAMES,
+  MAX_AGENTS,
+  MAX_DEVICE_PIXEL_RATIO,
+  TELEMETRY_SAMPLE_MS,
+} from "./config";
 import { ThroughputController } from "./controller";
 import { initGpu, installGpuErrorHandlers, resizeCanvas } from "./gpu";
 import { Renderer } from "./renderer";
@@ -21,9 +27,17 @@ export interface RunningApp {
 export async function startApp(elements: AppElements, options: AppOptions): Promise<RunningApp> {
   const { canvas, monitor } = elements;
   const { device, context, format } = await initGpu(canvas);
-  const simulation = new Simulation(device, DEMO_AGENT_COUNT);
-  const renderer = new Renderer(device, format, DEMO_AGENT_COUNT);
+  const simulation = new Simulation(device, MAX_AGENTS);
+  const renderer = new Renderer(
+    device,
+    format,
+    simulation.agentsBuffer,
+    simulation.denseBuffer,
+    simulation.indirectBuffer,
+  );
   const controller = new ThroughputController({ warmupFrames: CONTROLLER_WARMUP_FRAMES });
+  const camera = new Camera();
+  let cameraFitted = false;
 
   let animationFrame = 0;
   let stopped = false;
@@ -35,6 +49,8 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
   let windowSteps = 0;
   let removeGpuErrorHandlers = (): void => {};
 
+  const detachInput = attachCameraControls(canvas, camera);
+
   const stop = (): void => {
     if (stopped) {
       return;
@@ -42,6 +58,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     stopped = true;
     cancelAnimationFrame(animationFrame);
     removeGpuErrorHandlers();
+    detachInput();
   };
 
   const fail = (error: unknown): void => {
@@ -61,15 +78,22 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
       started = true;
       lastTimestamp = timestamp;
 
-      const size = resizeCanvas(canvas, MAX_DEVICE_PIXEL_RATIO);
-      const aspect = size.width / size.height;
+      resizeCanvas(canvas, MAX_DEVICE_PIXEL_RATIO);
+      const viewport: Viewport = {
+        width: canvas.clientWidth || 1,
+        height: canvas.clientHeight || 1,
+      };
+      if (!cameraFitted && viewport.width > 1 && viewport.height > 1) {
+        camera.fitWorld(viewport);
+        cameraFitted = true;
+      }
 
-      renderer.updateParams(aspect);
+      renderer.update(camera.center, camera.zoom, viewport.width, viewport.height, camera.visibleTiles(viewport));
 
       const encoder = device.createCommandEncoder();
       simulation.encode(encoder, steps);
       const view = context.getCurrentTexture().createView();
-      renderer.encode(encoder, view, simulation.currentPositionBuffer);
+      renderer.encode(encoder, view);
       device.queue.submit([encoder.finish()]);
 
       windowFrames += 1;
@@ -94,6 +118,57 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
 
   animationFrame = requestAnimationFrame(frame);
   return { stop };
+}
+
+function attachCameraControls(canvas: HTMLCanvasElement, camera: Camera): () => void {
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  const viewport = (): Viewport => ({
+    width: canvas.clientWidth || 1,
+    height: canvas.clientHeight || 1,
+  });
+
+  const onPointerDown = (e: PointerEvent): void => {
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: PointerEvent): void => {
+    if (!dragging) {
+      return;
+    }
+    camera.pan(e.clientX - lastX, e.clientY - lastY);
+    lastX = e.clientX;
+    lastY = e.clientY;
+  };
+  const onPointerUp = (e: PointerEvent): void => {
+    dragging = false;
+    if (canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+  };
+  const onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    camera.zoomBy(e.deltaY, { x: e.clientX - rect.left, y: e.clientY - rect.top }, viewport());
+  };
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointerleave", onPointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  return () => {
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("pointerleave", onPointerUp);
+    canvas.removeEventListener("wheel", onWheel);
+  };
 }
 
 function decideSteps(

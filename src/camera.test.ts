@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+
+import { Camera, type Viewport } from "./camera";
+import { MAX_ZOOM, MIN_ZOOM } from "./config";
+
+const viewport: Viewport = { width: 800, height: 600 };
+
+describe("Camera world<->screen", () => {
+  it("places the camera centre at the viewport centre", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 100);
+    const screen = cam.worldToScreen({ x: 0.5, y: 0.5 }, viewport);
+    expect(screen.x).toBeCloseTo(400, 9);
+    expect(screen.y).toBeCloseTo(300, 9);
+  });
+
+  it("round-trips screen->world->screen", () => {
+    const cam = new Camera({ x: 0.3, y: 0.7 }, 250);
+    const world = cam.screenToWorld({ x: 123, y: 456 }, viewport);
+    const screen = cam.worldToScreen(world, viewport);
+    expect(screen.x).toBeCloseTo(123, 6);
+    expect(screen.y).toBeCloseTo(456, 6);
+  });
+});
+
+describe("Camera pan", () => {
+  it("moves the world under the cursor opposite to the drag", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 100);
+    cam.pan(100, 0); // drag right by 100px
+    expect(cam.center.x).toBeCloseTo(0.5 - 100 / 100, 9);
+  });
+
+  it("inverts screen-y so dragging down moves the view down", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 100);
+    cam.pan(0, 50);
+    expect(cam.center.y).toBeCloseTo(0.5 + 50 / 100, 9);
+  });
+});
+
+describe("Camera zoomBy", () => {
+  it("keeps the world point under the cursor fixed", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 200);
+    const cursor = { x: 600, y: 200 };
+    const before = cam.screenToWorld(cursor, viewport);
+    cam.zoomBy(-240, cursor, viewport); // zoom in
+    const after = cam.screenToWorld(cursor, viewport);
+    expect(after.x).toBeCloseTo(before.x, 6);
+    expect(after.y).toBeCloseTo(before.y, 6);
+    expect(cam.zoom).toBeGreaterThan(200);
+  });
+
+  it("clamps zoom to the configured bounds", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 200);
+    cam.zoomBy(-1e6, { x: 400, y: 300 }, viewport);
+    expect(cam.zoom).toBe(MAX_ZOOM);
+    cam.zoomBy(1e6, { x: 400, y: 300 }, viewport);
+    expect(cam.zoom).toBe(MIN_ZOOM);
+  });
+});
+
+describe("Camera visibleTiles", () => {
+  it("returns a single tile when fully zoomed onto one copy", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 100_000);
+    const tiles = cam.visibleTiles(viewport);
+    expect(tiles).toEqual({ minX: 0, maxX: 0, minY: 0, maxY: 0 });
+  });
+
+  it("spans negative and positive tiles when zoomed out", () => {
+    const cam = new Camera({ x: 0.5, y: 0.5 }, 100); // ~8 world units wide
+    const tiles = cam.visibleTiles(viewport);
+    expect(tiles.minX).toBeLessThan(0);
+    expect(tiles.maxX).toBeGreaterThan(0);
+    expect(tiles.minY).toBeLessThan(0);
+    expect(tiles.maxY).toBeGreaterThan(0);
+  });
+});

@@ -1,57 +1,108 @@
-// Placeholder renderer.
+// Renderer for the torus agent world.
 //
-// Draws each agent as a small instanced quad. Positions are supplied as an
-// instanced vertex buffer (the simulation's current position buffer), so no
-// storage-buffer reads happen in the vertex stage. The buffer is bound per
-// frame to whichever ping-pong buffer holds the latest state.
+// Agents are drawn as direction-facing, HSV-coloured triangles via an indirect
+// draw whose instance count is the GPU-resident live count (no readback). The
+// world is the unit square; to visualise the torus wrapping it is tiled across
+// the visible viewport, and each tile gets a thin grey border. Pan/zoom come
+// from the pure `Camera`; the renderer only consumes the resulting transform.
 
-import { CLEAR_COLOR, POINT_SIZE } from "./config";
+import { AGENT_TRIANGLE_SIZE, BORDER_COLOR, CLEAR_COLOR, WORLD_SIZE } from "./config";
+import type { TileRange } from "./camera";
+
+const MAX_TILES = 1024;
+const TILE_STRIDE = 256; // min uniform buffer dynamic-offset alignment
 
 const SHADER = /* wgsl */ `
-struct RenderParams {
-  aspect: f32,
-  pointSize: f32,
+struct Camera {
+  center: vec2f,
+  scale: vec2f,
+  triSize: f32,
 }
 
-@group(0) @binding(0) var<uniform> rp: RenderParams;
+struct Tile {
+  offset: vec2f,
+  pad: vec2f,
+}
+
+struct Agent {
+  pos: vec2f,
+  dir: f32,
+  vel: f32,
+  hue: f32,
+  sat: f32,
+  val: f32,
+  alive: u32,
+  id: u32,
+}
+
+struct Dense {
+  pos: vec2f,
+  slot: u32,
+  pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> tile: Tile;
+@group(0) @binding(2) var<storage, read> agents: array<Agent>;
+@group(0) @binding(3) var<storage, read> dense: array<Dense>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
   @location(0) color: vec3f,
 }
 
-fn hue(h: f32) -> vec3f {
-  let k = fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0;
-  return clamp(abs(k) - 1.0, vec3f(0.0), vec3f(1.0));
+fn hsv2rgb(hsv: vec3f) -> vec3f {
+  let h = fract(hsv.x) * 6.0;
+  let c = hsv.z * hsv.y;
+  let x = c * (1.0 - abs(fract(h * 0.5) * 2.0 - 1.0));
+  var rgb = vec3f(0.0);
+  if (h < 1.0) { rgb = vec3f(c, x, 0.0); }
+  else if (h < 2.0) { rgb = vec3f(x, c, 0.0); }
+  else if (h < 3.0) { rgb = vec3f(0.0, c, x); }
+  else if (h < 4.0) { rgb = vec3f(0.0, x, c); }
+  else if (h < 5.0) { rgb = vec3f(x, 0.0, c); }
+  else { rgb = vec3f(c, 0.0, x); }
+  return rgb + (hsv.z - c);
+}
+
+fn toClip(world: vec2f) -> vec4f {
+  let ndc = (world - camera.center) * camera.scale;
+  return vec4f(ndc, 0.0, 1.0);
 }
 
 @vertex
-fn vs(
-  @builtin(vertex_index) vi: u32,
-  @builtin(instance_index) ii: u32,
-  @location(0) agent: vec2f,
-) -> VSOut {
-  var corners = array<vec2f, 6>(
-    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
-    vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+fn vsAgent(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let a = agents[dense[ii].slot];
+  let s = camera.triSize;
+  var local = array<vec2f, 3>(
+    vec2f(s, 0.0),
+    vec2f(-0.6 * s, 0.5 * s),
+    vec2f(-0.6 * s, -0.5 * s),
   );
-
-  var ndc = agent * 2.0 - vec2f(1.0, 1.0);
-  ndc.y = -ndc.y;
-  var offset = corners[vi] * rp.pointSize;
-
-  // Keep the world square regardless of canvas aspect ratio.
-  if (rp.aspect >= 1.0) {
-    ndc.x = ndc.x / rp.aspect;
-    offset.x = offset.x / rp.aspect;
-  } else {
-    ndc.y = ndc.y * rp.aspect;
-    offset.y = offset.y * rp.aspect;
-  }
+  let lv = local[vi];
+  let c = cos(a.dir);
+  let sn = sin(a.dir);
+  let rotated = vec2f(lv.x * c - lv.y * sn, lv.x * sn + lv.y * c);
+  let world = a.pos + tile.offset + rotated;
 
   var out: VSOut;
-  out.pos = vec4f(ndc + offset, 0.0, 1.0);
-  out.color = hue(f32(ii) * 0.618034);
+  out.pos = toClip(world);
+  out.color = hsv2rgb(vec3f(a.hue, a.sat, a.val));
+  return out;
+}
+
+@vertex
+fn vsBorder(@builtin(vertex_index) vi: u32) -> VSOut {
+  let w = f32(${WORLD_SIZE});
+  var corners = array<vec2f, 8>(
+    vec2f(0.0, 0.0), vec2f(w, 0.0),
+    vec2f(w, 0.0), vec2f(w, w),
+    vec2f(w, w), vec2f(0.0, w),
+    vec2f(0.0, w), vec2f(0.0, 0.0),
+  );
+  var out: VSOut;
+  out.pos = toClip(corners[vi] + tile.offset);
+  out.color = vec3f(${BORDER_COLOR[0]}, ${BORDER_COLOR[1]}, ${BORDER_COLOR[2]});
   return out;
 }
 
@@ -63,72 +114,146 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 export class Renderer {
   private readonly device: GPUDevice;
-  private readonly agentCount: number;
-  private readonly pipeline: GPURenderPipeline;
-  private readonly paramsBuffer: GPUBuffer;
+  private readonly agentPipeline: GPURenderPipeline;
+  private readonly borderPipeline: GPURenderPipeline;
+  private readonly cameraBuffer: GPUBuffer;
+  private readonly tileBuffer: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
+  private readonly indirect: GPUBuffer;
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, agentCount: number) {
+  private tileCount = 0;
+
+  constructor(
+    device: GPUDevice,
+    format: GPUTextureFormat,
+    agents: GPUBuffer,
+    dense: GPUBuffer,
+    indirect: GPUBuffer,
+  ) {
     this.device = device;
-    this.agentCount = agentCount;
+    this.indirect = indirect;
 
-    this.paramsBuffer = device.createBuffer({
-      size: 8,
+    this.cameraBuffer = device.createBuffer({
+      size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      label: "render-params",
+      label: "camera",
+    });
+    this.tileBuffer = device.createBuffer({
+      size: MAX_TILES * TILE_STRIDE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      label: "tiles",
     });
 
     const layout = device.createBindGroupLayout({
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }],
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 16 },
+        },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    this.bindGroup = device.createBindGroup({
+      layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.cameraBuffer } },
+        { binding: 1, resource: { buffer: this.tileBuffer, size: 16 } },
+        { binding: 2, resource: { buffer: agents } },
+        { binding: 3, resource: { buffer: dense } },
+      ],
     });
 
     const module = device.createShaderModule({ code: SHADER });
-    this.pipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-      vertex: {
-        module,
-        entryPoint: "vs",
-        buffers: [
-          {
-            arrayStride: 8,
-            stepMode: "instance",
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-          },
-        ],
-      },
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    this.agentPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module, entryPoint: "vsAgent" },
       fragment: { module, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "triangle-list" },
     });
-
-    this.bindGroup = device.createBindGroup({
-      layout,
-      entries: [{ binding: 0, resource: { buffer: this.paramsBuffer } }],
+    this.borderPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module, entryPoint: "vsBorder" },
+      fragment: { module, entryPoint: "fs", targets: [{ format }] },
+      primitive: { topology: "line-list" },
     });
   }
 
-  updateParams(aspect: number): void {
-    this.device.queue.writeBuffer(this.paramsBuffer, 0, new Float32Array([aspect, POINT_SIZE]));
+  /** Update the camera transform and the per-tile offsets for this frame. */
+  update(
+    center: { x: number; y: number },
+    zoom: number,
+    canvasWidth: number,
+    canvasHeight: number,
+    tiles: TileRange,
+  ): void {
+    const cam = new Float32Array(8);
+    cam[0] = center.x;
+    cam[1] = center.y;
+    cam[2] = (2 * zoom) / canvasWidth;
+    cam[3] = (2 * zoom) / canvasHeight;
+    cam[4] = AGENT_TRIANGLE_SIZE;
+    this.device.queue.writeBuffer(this.cameraBuffer, 0, cam);
+
+    const offsets = this.collectTileOffsets(tiles);
+    this.tileCount = offsets.length;
+    const data = new Uint8Array(this.tileCount * TILE_STRIDE);
+    const view = new Float32Array(data.buffer);
+    for (let i = 0; i < this.tileCount; i += 1) {
+      view[(i * TILE_STRIDE) / 4 + 0] = offsets[i][0];
+      view[(i * TILE_STRIDE) / 4 + 1] = offsets[i][1];
+    }
+    if (this.tileCount > 0) {
+      this.device.queue.writeBuffer(this.tileBuffer, 0, data);
+    }
   }
 
-  encode(
-    encoder: GPUCommandEncoder,
-    view: GPUTextureView,
-    positions: GPUBuffer,
-  ): void {
+  encode(encoder: GPUCommandEncoder, view: GPUTextureView): void {
     const pass = encoder.beginRenderPass({
       colorAttachments: [
-        {
-          view,
-          clearValue: CLEAR_COLOR,
-          loadOp: "clear",
-          storeOp: "store",
-        },
+        { view, clearValue: CLEAR_COLOR, loadOp: "clear", storeOp: "store" },
       ],
     });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.setVertexBuffer(0, positions);
-    pass.draw(6, this.agentCount);
+
+    pass.setPipeline(this.borderPipeline);
+    for (let i = 0; i < this.tileCount; i += 1) {
+      pass.setBindGroup(0, this.bindGroup, [i * TILE_STRIDE]);
+      pass.draw(8, 1);
+    }
+
+    pass.setPipeline(this.agentPipeline);
+    for (let i = 0; i < this.tileCount; i += 1) {
+      pass.setBindGroup(0, this.bindGroup, [i * TILE_STRIDE]);
+      pass.drawIndirect(this.indirect, 0);
+    }
+
     pass.end();
+  }
+
+  // Clamp the visible tile range to MAX_TILES around its centre so an extreme
+  // zoom-out cannot explode the draw-call count.
+  private collectTileOffsets(tiles: TileRange): Array<[number, number]> {
+    let { minX, maxX, minY, maxY } = tiles;
+    const side = Math.floor(Math.sqrt(MAX_TILES));
+    if (maxX - minX + 1 > side) {
+      const cx = Math.floor((minX + maxX) / 2);
+      minX = cx - Math.floor(side / 2);
+      maxX = minX + side - 1;
+    }
+    if (maxY - minY + 1 > side) {
+      const cy = Math.floor((minY + maxY) / 2);
+      minY = cy - Math.floor(side / 2);
+      maxY = minY + side - 1;
+    }
+    const offsets: Array<[number, number]> = [];
+    for (let ty = minY; ty <= maxY; ty += 1) {
+      for (let tx = minX; tx <= maxX; tx += 1) {
+        offsets.push([tx * WORLD_SIZE, ty * WORLD_SIZE]);
+      }
+    }
+    return offsets;
   }
 }

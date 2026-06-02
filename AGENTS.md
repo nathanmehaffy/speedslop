@@ -11,10 +11,12 @@ Critical code pathways should be extensively tested as the simulation grows, esp
 See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the current implementation:
 
 - `src/main.ts` handles DOM lookup and fatal-error display.
-- `src/app.ts` owns the `requestAnimationFrame` loop and wires together GPU setup, simulation, rendering, throughput control, and the small fps/steps monitor.
+- `src/app.ts` owns the `requestAnimationFrame` loop, wires together GPU setup, simulation, rendering, throughput control, and the fps/steps monitor, and handles pan/zoom input.
 - `src/gpu.ts` initializes WebGPU, resizes the canvas, and installs GPU error handlers.
-- `src/simulation.ts` contains the simple deterministic demo simulation and GPU buffers.
-- `src/renderer.ts` renders the simulation state.
+- `src/simulation.ts` is the torus agent simulation: fixed-capacity agent slots, a per-step counting-sort spatial grid that compacts live agents into a dense cell-sorted array, an N-closest sensory gather pass (the future brain input), random rainbow movement, and GPU-side sine-waved births/deaths.
+- `src/renderer.ts` draws agents as direction-facing HSV triangles via an indirect draw, tiled across the visible viewport to show torus wrapping with grey edge borders.
+- `src/spatial.ts` is pure, tested cell-index / toroidal-distance / population-target math mirrored by the simulation shaders.
+- `src/camera.ts` is the pure, tested pan/zoom camera (world<->screen transform and visible-tile range).
 - `src/controller.ts` is the pure, tested blind throughput controller.
 - `src/telemetry.ts` formats the lightweight on-screen monitor.
 - `src/config.ts` centralizes small runtime constants.
