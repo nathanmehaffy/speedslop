@@ -11,6 +11,7 @@ import {
   HEAD_ON_DOT,
   HUE_MUTATION_SCALE,
   MAX_AGENTS,
+  POPULATION_FLOOR,
   MUTATION_RATE,
   MUTATION_SCALE,
   MUTATION_WEIGHT_LIMIT,
@@ -71,6 +72,7 @@ describe("GPU layout contracts", () => {
     expect(u[18]).toBe(NUM_CELLS);
     expect(u[19]).toBe(NEURAL_NEIGHBORS);
     expect(u[20]).toBe(BRAIN_WEIGHT_COUNT);
+    expect(u[21]).toBe(POPULATION_FLOOR);
   });
 
   it("keeps the grid compatible with the single-workgroup prefix scan", () => {

@@ -17,6 +17,7 @@ import {
   HUE_MUTATION_SCALE,
   INITIAL_AGENTS,
   MAX_AGENTS,
+  POPULATION_FLOOR,
   MUTATION_RATE,
   MUTATION_SCALE,
   MUTATION_WEIGHT_LIMIT,
@@ -59,8 +60,13 @@ const PIPELINE_NAMES = [
   "resolveMates",
   "commitAgents",
   "spawnChildren",
+  "tallyStep",
   "writeIndirect",
 ] as const;
+
+/** Byte offset of `windowDeaths` / `windowBirths` in the meta storage buffer. */
+export const META_WINDOW_STATS_OFFSET = 24;
+export const META_WINDOW_STATS_BYTES = 8;
 type PipelineName = (typeof PIPELINE_NAMES)[number];
 
 if (NUM_CELLS % SCAN_WG !== 0) {
@@ -99,7 +105,7 @@ struct Params {
   numCells: u32,
   neuralNeighbors: u32,
   brainWeightCount: u32,
-  pad1: u32,
+  populationFloor: u32,
   pad2: u32,
   pad3: u32,
 }
@@ -114,6 +120,10 @@ struct Meta {
   denseCount: atomic<u32>,
   freeCount: atomic<u32>,
   birthCount: atomic<u32>,
+  deathCount: atomic<u32>,
+  spawnCount: atomic<u32>,
+  windowDeaths: atomic<u32>,
+  windowBirths: atomic<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -188,6 +198,30 @@ fn speedNorm(vel: f32) -> f32 {
   return clamp((vel - params.minSpeed) / max(params.maxSpeed - params.minSpeed, 0.000001) * 2.0 - 1.0, -1.0, 1.0);
 }
 
+fn writeRandomBrain(slot: u32, seed: u32) {
+  let base = slot * params.brainWeightCount;
+  for (var i = 0u; i < ${BRAIN_WEIGHT_COUNT}u; i = i + 1u) {
+    let s = hash2(seed ^ i, slot);
+    brains[base + i] = (randf(s) * 2.0 - 1.0) * 0.5;
+  }
+}
+
+fn spawnRandomAgent(slot: u32, seed: u32) -> Agent {
+  let s0 = hash2(seed, slot ^ 0x85ebca6bu);
+  let s1 = hash2(seed ^ 0x632be5abu, slot);
+  let s2 = hash2(seed ^ 0x85157af5u, globals.step);
+  var a: Agent;
+  a.pos = vec2f(randf(s0) * params.worldSize, randf(s0 ^ 0x27d4eb2du) * params.worldSize);
+  a.dir = randf(s1) * TWO_PI;
+  a.vel = params.minSpeed + randf(s1 ^ 0x165667b1u) * (params.maxSpeed - params.minSpeed);
+  a.hue = randf(s2);
+  a.sat = 0.85;
+  a.val = 1.0;
+  a.alive = 1u;
+  a.id = pcg(slot ^ globals.step ^ seed);
+  return a;
+}
+
 fn squash(x: f32) -> f32 {
   return x / (1.0 + abs(x));
 }
@@ -225,6 +259,8 @@ fn clearStep(@builtin(global_invocation_id) gid: vec3u) {
     globals.step = globals.step + 1u;
     atomicStore(&globals.freeCount, 0u);
     atomicStore(&globals.birthCount, 0u);
+    atomicStore(&globals.deathCount, 0u);
+    atomicStore(&globals.spawnCount, 0u);
   }
 }
 
@@ -517,6 +553,13 @@ fn commitAgents(@builtin(global_invocation_id) gid: vec3u) {
     return;
   }
   if (atomicLoad(&killMarks[slot]) != 0u) {
+    atomicAdd(&globals.deathCount, 1u);
+    if (atomicLoad(&globals.denseCount) < params.populationFloor) {
+      let seed = hash2(slot ^ globals.step, 0xdeadbeefu);
+      agents[slot] = spawnRandomAgent(slot, seed);
+      writeRandomBrain(slot, seed);
+      return;
+    }
     a.alive = 0u;
     agents[slot] = a;
     return;
@@ -585,6 +628,13 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   agents[childSlot] = child;
+  atomicAdd(&globals.spawnCount, 1u);
+}
+
+@compute @workgroup_size(1)
+fn tallyStep() {
+  atomicAdd(&globals.windowDeaths, atomicLoad(&globals.deathCount));
+  atomicAdd(&globals.windowBirths, atomicLoad(&globals.spawnCount));
 }
 
 @compute @workgroup_size(1)
@@ -604,9 +654,15 @@ export class Simulation {
   private readonly agents: GPUBuffer;
   private readonly dense: GPUBuffer;
   private readonly indirect: GPUBuffer;
+  private readonly meta: GPUBuffer;
+  private readonly statsReadback: GPUBuffer;
 
   private readonly clearWorkgroups: number;
   private readonly agentWorkgroups: number;
+
+  private statsCopyPending = false;
+  private statsMapPending = false;
+  private telemetryAccum = { deaths: 0, births: 0 };
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -633,7 +689,16 @@ export class Simulation {
     brains.unmap();
 
     // Zero-initialized: step and counters start at 0.
-    const meta = device.createBuffer({ size: 16, usage: storage, label: "meta" });
+    this.meta = device.createBuffer({
+      size: 32,
+      usage: storage | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      label: "meta",
+    });
+    this.statsReadback = device.createBuffer({
+      size: META_WINDOW_STATS_BYTES,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      label: "stats-readback",
+    });
     const cellCount = device.createBuffer({ size: NUM_CELLS * 4, usage: storage, label: "cell-count" });
     const cellStart = device.createBuffer({ size: (NUM_CELLS + 1) * 4, usage: storage, label: "cell-start" });
     this.dense = device.createBuffer({ size: MAX_AGENTS * DENSE_BYTES, usage: storage, label: "dense" });
@@ -678,7 +743,7 @@ export class Simulation {
       entries: [
         { binding: 0, resource: { buffer: paramsBuffer } },
         { binding: 1, resource: { buffer: this.agents } },
-        { binding: 2, resource: { buffer: meta } },
+        { binding: 2, resource: { buffer: this.meta } },
         { binding: 3, resource: { buffer: cellCount } },
         { binding: 4, resource: { buffer: cellStart } },
         { binding: 5, resource: { buffer: this.dense } },
@@ -735,6 +800,7 @@ export class Simulation {
       this.dispatch(pass, "resolveMates", this.agentWorkgroups);
       this.dispatch(pass, "commitAgents", this.agentWorkgroups);
       this.dispatch(pass, "spawnChildren", this.agentWorkgroups);
+      this.dispatch(pass, "tallyStep", 1);
     }
     // Rebuild the live index after movement, deaths, and births so render sees final state.
     this.dispatch(pass, "clearIndex", this.clearWorkgroups);
@@ -743,6 +809,36 @@ export class Simulation {
     this.dispatch(pass, "scatter", this.agentWorkgroups);
     this.dispatch(pass, "writeIndirect", 1);
     pass.end();
+    if (!this.statsMapPending) {
+      encoder.copyBufferToBuffer(this.meta, META_WINDOW_STATS_OFFSET, this.statsReadback, 0, META_WINDOW_STATS_BYTES);
+      this.statsCopyPending = true;
+    }
+  }
+
+  /** Drain completed GPU stats copies into the telemetry accumulator. */
+  pollTelemetry(): void {
+    if (!this.statsCopyPending || this.statsMapPending) {
+      return;
+    }
+    this.statsCopyPending = false;
+    this.statsMapPending = true;
+    void this.device.queue.onSubmittedWorkDone().then(() => this.statsReadback.mapAsync(GPUMapMode.READ)).then(() => {
+      const view = this.statsReadback.getMappedRange();
+      const stats = new Uint32Array(view);
+      this.telemetryAccum.deaths += stats[0] ?? 0;
+      this.telemetryAccum.births += stats[1] ?? 0;
+      this.statsReadback.unmap();
+      this.device.queue.writeBuffer(this.meta, META_WINDOW_STATS_OFFSET, new Uint32Array(2));
+      this.statsMapPending = false;
+    });
+  }
+
+  /** Snapshot and clear death/birth counts accumulated since the last call. */
+  takeTelemetryAccum(): { deaths: number; births: number } {
+    const snapshot = { ...this.telemetryAccum };
+    this.telemetryAccum.deaths = 0;
+    this.telemetryAccum.births = 0;
+    return snapshot;
   }
 
   private dispatch(pass: GPUComputePassEncoder, name: PipelineName, workgroups: number): void {
@@ -776,14 +872,14 @@ export function buildSimulationParams(): ArrayBuffer {
   u[18] = NUM_CELLS;
   u[19] = NEURAL_NEIGHBORS;
   u[20] = BRAIN_WEIGHT_COUNT;
-  u[21] = 0;
+  u[21] = POPULATION_FLOOR;
   u[22] = 0;
   u[23] = 0;
   return buf;
 }
 
-// Seed the initial population with random agents; the rest begin dead and can be
-// filled only by collision breeding.
+// Seed the initial population with random agents; the rest begin dead and are
+// filled by collision breeding or random immigrants when below POPULATION_FLOOR.
 function writeInitialAgents(range: ArrayBuffer, count: number): void {
   const f = new Float32Array(range);
   const u = new Uint32Array(range);

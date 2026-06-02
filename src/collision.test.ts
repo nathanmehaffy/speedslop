@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AGENT_HIT_RADIUS } from "./config";
+import { AGENT_HIT_RADIUS, WORLD_SIZE } from "./config";
 import { classifyCollision } from "./collision";
 
 describe("classifyCollision", () => {
@@ -22,7 +22,8 @@ describe("classifyCollision", () => {
 
   it("uses the torus wrap for collision distance", () => {
     const gap = AGENT_HIT_RADIUS * 1.5;
-    const result = classifyCollision(1 - gap * 0.5, 0.5, 0, gap * 0.5, 0.5, Math.PI);
+    const mid = WORLD_SIZE / 2;
+    const result = classifyCollision(WORLD_SIZE - gap * 0.5, mid, 0, gap * 0.5, mid, Math.PI);
     expect(result.kind).toBe("head-on");
   });
 });

@@ -13,7 +13,7 @@ See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the curr
 - `src/main.ts` handles DOM lookup and fatal-error display.
 - `src/app.ts` owns the `requestAnimationFrame` loop, wires together GPU setup, simulation, rendering, throughput control, and the fps/steps monitor, and handles pan/zoom input.
 - `src/gpu.ts` initializes WebGPU (requiring the `timestamp-query` feature), resizes the canvas, and installs GPU error handlers.
-- `src/simulation.ts` is the torus agent simulation: fixed-capacity agent slots, neural-network movement, circular hitbox collision deaths/head-on breeding, genetic crossover/mutation, and a per-step counting-sort that builds the cell-sorted neighbor index (`dense` + `cellStart`) used for sensing and rendering.
+- `src/simulation.ts` is the torus agent simulation: fixed-capacity agent slots, neural-network movement, circular hitbox collision deaths/head-on breeding, genetic crossover/mutation, random immigrants when live count is below half capacity, and a per-step counting-sort that builds the cell-sorted neighbor index (`dense` + `cellStart`) used for sensing and rendering.
 - `src/renderer.ts` draws agents as direction-facing HSV triangles via an indirect draw, tiled across the visible viewport to show torus wrapping with grey edge borders.
 - `src/layout.ts` centralizes GPU buffer-layout constants and shared WGSL structs used by both simulation and rendering.
 - `src/spatial.ts` is pure, tested cell-index / toroidal-distance math that mirrors small shader-side invariants.
@@ -24,7 +24,7 @@ See `ARCHITECTURE.md` for the controller and GPU pipeline rationale. In the curr
   non-blocking pipelined buffer pool.
 - `src/controller.ts` is the pure, tested throughput controller driven by measured
   frame cost (GPU + CPU encode).
-- `src/telemetry.ts` formats the lightweight on-screen monitor.
+- `src/telemetry.ts` formats the lightweight on-screen monitor (fps, sim steps/s, deaths/s, births/s).
 - `src/config.ts` centralizes small runtime constants.
 
 ## Development Commands

@@ -82,8 +82,8 @@ behavioral *content* of the simulation is deliberately out of scope here.
   pool of mappable buffers.
 - `src/controller.ts` is a pure, unit-tested throughput controller driven by the
   measured GPU time; it has no browser or GPU dependencies.
-- `src/telemetry.ts` formats the small on-screen fps / sim-steps-per-sec / GPU-ms
-  monitor.
+- `src/telemetry.ts` formats the small on-screen fps / sim-steps-per-sec /
+  deaths-per-sec / births-per-sec monitor.
 - `src/config.ts` holds shared demo/runtime constants.
 
 ## The frame loop

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Camera, type Viewport } from "./camera";
-import { ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT } from "./config";
+import { WORLD_SIZE, ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT } from "./config";
 
 const viewport: Viewport = { width: 800, height: 600 };
 
@@ -51,7 +51,7 @@ describe("Camera zoomBy", () => {
   it("clamps zoom to limits relative to the fit-world reference", () => {
     const cam = new Camera();
     cam.fitWorld(viewport);
-    const reference = (Math.min(viewport.width, viewport.height) * 0.9) / 1;
+    const reference = (Math.min(viewport.width, viewport.height) * 0.9) / WORLD_SIZE;
 
     cam.zoomBy(-1e6, { x: 400, y: 300 }, viewport);
     expect(cam.zoom).toBeCloseTo(reference * ZOOM_IN_LIMIT, 9);
@@ -68,7 +68,8 @@ describe("Camera visibleTiles", () => {
   });
 
   it("spans negative and positive tiles when zoomed out", () => {
-    const cam = new Camera({ x: 0.5, y: 0.5 }, 100); // ~8 world units wide
+    const mid = WORLD_SIZE / 2;
+    const cam = new Camera({ x: mid, y: mid }, 100);
     const tiles = cam.visibleTiles(viewport);
     expect(tiles.minX).toBeLessThan(0);
     expect(tiles.maxX).toBeGreaterThan(0);

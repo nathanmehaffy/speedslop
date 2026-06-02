@@ -9,16 +9,18 @@ export const MAX_DEVICE_PIXEL_RATIO = 2;
 // floats below it through collision deaths and childbirth.
 export const MAX_AGENTS = 10_000;
 
-// Spatial grid resolution per axis. GRID_DIM^2 cells tile the unit world; sized
-// so live agents can be compacted into a stable cell-sorted draw list.
-export const GRID_DIM = 64;
+// Spatial grid resolution per axis. GRID_DIM^2 cells tile the world; sized so
+// cell width stays stable when WORLD_SIZE changes.
+export const GRID_DIM = 256;
 
-// The world is the unit square, wrapped at the edges (a torus).
-export const WORLD_SIZE = 1;
+// Torus world extent per axis (16x the original unit-square area).
+export const WORLD_SIZE = 4;
 
-// Initial random population. After startup, births and deaths come from agent
-// interactions rather than global demographic churn.
-export const INITIAL_AGENTS = MAX_AGENTS / 2;
+// Minimum population before collision deaths are offset by random immigrants.
+export const POPULATION_FLOOR = MAX_AGENTS / 2;
+
+// Initial random population, seeded at the floor.
+export const INITIAL_AGENTS = POPULATION_FLOOR;
 export const STEP_DT = 1.0;
 
 // Collision ---------------------------------------------------------------
