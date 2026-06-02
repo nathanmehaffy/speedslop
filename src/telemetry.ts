@@ -2,21 +2,15 @@ export interface TelemetrySample {
   elapsedMs: number;
   frames: number;
   steps: number;
-  deaths: number;
-  births: number;
 }
 
 export function renderTelemetry(sample: TelemetrySample): string {
   const fps = (sample.frames * 1000) / sample.elapsedMs;
   const stepsPerSecond = (sample.steps * 1000) / sample.elapsedMs;
-  const deathsPerSecond = (sample.deaths * 1000) / sample.elapsedMs;
-  const birthsPerSecond = (sample.births * 1000) / sample.elapsedMs;
 
   return [
     `${fps.toFixed(1)} fps`,
     `${formatCount(stepsPerSecond)} sim steps/s`,
-    `${formatCount(deathsPerSecond)} deaths/s`,
-    `${formatCount(birthsPerSecond)} births/s`,
   ].join("\n");
 }
 

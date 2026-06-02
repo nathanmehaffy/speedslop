@@ -44,8 +44,6 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
   let windowStart = performance.now();
   let windowFrames = 0;
   let windowSteps = 0;
-  let windowDeaths = 0;
-  let windowBirths = 0;
   let removeGpuErrorHandlers = (): void => {};
 
   const detachInput = attachCameraControls(canvas, camera);
@@ -95,7 +93,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
         cameraFitted = true;
       }
 
-      renderer.update(camera.center, camera.zoom, viewport.width, viewport.height, camera.visibleTiles(viewport));
+      renderer.update(camera.center, camera.zoom, viewport.width, viewport.height, camera.visibleTileOffsets(viewport));
 
       const workStart = performance.now();
       const encoder = device.createCommandEncoder();
@@ -105,27 +103,19 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
       profiler.resolve(encoder, steps, performance.now() - workStart);
       device.queue.submit([encoder.finish()]);
       profiler.poll();
-      simulation.pollTelemetry();
 
       windowFrames += 1;
       windowSteps += steps;
       const elapsed = timestamp - windowStart;
       if (elapsed >= TELEMETRY_SAMPLE_MS && monitor) {
-        const { deaths, births } = simulation.takeTelemetryAccum();
-        windowDeaths += deaths;
-        windowBirths += births;
         monitor.textContent = renderTelemetry({
           elapsedMs: elapsed,
           frames: windowFrames,
           steps: windowSteps,
-          deaths: windowDeaths,
-          births: windowBirths,
         });
         windowStart = timestamp;
         windowFrames = 0;
         windowSteps = 0;
-        windowDeaths = 0;
-        windowBirths = 0;
       }
 
       animationFrame = requestAnimationFrame(frame);

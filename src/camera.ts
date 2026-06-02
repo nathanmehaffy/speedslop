@@ -4,6 +4,8 @@
 
 import { WORLD_SIZE, ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT, ZOOM_SENSITIVITY } from "./config";
 
+export const MAX_VISIBLE_TILES = 1024;
+
 export interface Viewport {
   width: number;
   height: number;
@@ -21,6 +23,8 @@ export interface TileRange {
   minY: number;
   maxY: number;
 }
+
+export type TileOffset = [number, number];
 
 export class Camera {
   /** World-space point at the centre of the viewport. */
@@ -89,6 +93,10 @@ export class Camera {
     };
   }
 
+  visibleTileOffsets(viewport: Viewport): TileOffset[] {
+    return tileOffsetsForRange(this.visibleTiles(viewport));
+  }
+
   private clampZoom(zoom: number): number {
     if (this.referenceZoom === null) {
       return zoom;
@@ -97,4 +105,34 @@ export class Camera {
     const maxZoom = this.referenceZoom * ZOOM_IN_LIMIT;
     return Math.min(maxZoom, Math.max(minZoom, zoom));
   }
+}
+
+export function clampTileRange(tiles: TileRange, maxTiles: number = MAX_VISIBLE_TILES): TileRange {
+  let { minX, maxX, minY, maxY } = tiles;
+  const side = Math.floor(Math.sqrt(maxTiles));
+  if (maxX - minX + 1 > side) {
+    const cx = Math.floor((minX + maxX) / 2);
+    minX = cx - Math.floor(side / 2);
+    maxX = minX + side - 1;
+  }
+  if (maxY - minY + 1 > side) {
+    const cy = Math.floor((minY + maxY) / 2);
+    minY = cy - Math.floor(side / 2);
+    maxY = minY + side - 1;
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+export function tileOffsetsForRange(
+  tiles: TileRange,
+  maxTiles: number = MAX_VISIBLE_TILES,
+): TileOffset[] {
+  const clamped = clampTileRange(tiles, maxTiles);
+  const offsets: TileOffset[] = [];
+  for (let ty = clamped.minY; ty <= clamped.maxY; ty += 1) {
+    for (let tx = clamped.minX; tx <= clamped.maxX; tx += 1) {
+      offsets.push([tx * WORLD_SIZE, ty * WORLD_SIZE]);
+    }
+  }
+  return offsets;
 }

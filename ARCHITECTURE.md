@@ -64,26 +64,31 @@ behavioral *content* of the simulation is deliberately out of scope here.
   lightweight telemetry.
 - `src/gpu.ts` contains WebGPU adapter/device/context setup, canvas resizing, and
   device-loss/error hooks.
-- `src/simulation.ts` is the torus agent simulation and its GPU buffers/pipelines:
-  fixed-capacity agent slots, neural-network movement, circular hitbox
-  collision deaths, head-on breeding, genetic crossover/mutation, and a
-  per-step counting-sort that builds the cell-sorted neighbor index (`dense` +
-  `cellStart`).
+- `src/simulation.ts` owns the torus simulation GPU buffers/pipelines and
+  compute-pass ordering.
+- `src/simulationShader.ts` contains the WGSL kernels for fixed-capacity agent
+  slots, neural-network movement, circular hitbox collision deaths, head-on
+  breeding, genetic crossover/mutation, random immigrants, and the counting-sort
+  neighbor index (`dense` + `cellStart`).
+- `src/simulationPacking.ts` owns CPU-side parameter and initial-buffer packing.
+- `src/simulationPolicy.ts` holds pure, tested policy invariants for sensing,
+  collision broadphase bounds, and demographic slot allocation.
 - `src/renderer.ts` renders agents as direction-facing HSV triangles into the
-  swapchain texture, tiled across the viewport to visualize torus wrapping.
+  swapchain texture, tiled across camera-provided offsets to visualize torus
+  wrapping.
 - `src/layout.ts` centralizes GPU buffer-layout constants and WGSL structs shared
   by simulation and rendering.
 - `src/spatial.ts`, `src/collision.ts`, `src/genetics.ts`, and `src/camera.ts`
   are pure, unit-tested modules for grid/toroidal math, collision
-  classification, genome contracts, and the pan/zoom camera with no GPU
-  dependencies.
+  classification, genome contracts, and the pan/zoom camera/view model with no
+  GPU dependencies.
 - `src/profiler.ts` owns the `timestamp-query` set, resolves the per-frame GPU
   timestamps, and reads the elapsed time back through a non-blocking pipelined
   pool of mappable buffers.
 - `src/controller.ts` is a pure, unit-tested throughput controller driven by the
   measured GPU time; it has no browser or GPU dependencies.
-- `src/telemetry.ts` formats the small on-screen fps / sim-steps-per-sec /
-  deaths-per-sec / births-per-sec monitor.
+- `src/telemetry.ts` formats the small on-screen fps / sim-steps-per-sec
+  monitor.
 - `src/config.ts` holds shared demo/runtime constants.
 
 ## The frame loop
@@ -244,13 +249,18 @@ index.
 4. **Collision choice:** agents compare planned circular hitboxes in nearby
    cells. Side/back impacts mark the hitter for death; reciprocal head-on choices
    become birth events.
-5. **Commit and childbirth:** killed agents are cleared, survivors commit planned
-   movement, and birth events write crossover/mutated children into free slots or
-   randomly overwrite one parent if capacity is full.
+5. **Death commit:** killed agents are cleared and survivors commit planned
+   movement.
+6. **Fresh free-list rebuild:** the index/free-list is rebuilt so same-step
+   deaths are available to childbirth.
+7. **Childbirth:** birth events write crossover/mutated children into free slots
+   or randomly overwrite one parent if capacity is full.
+8. **Population replenishment:** after another free-list rebuild, random
+   immigrants fill remaining free slots until the population floor is reached.
 
 After the step batch, the cell index is rebuilt once more and `writeIndirect`
 copies the final live count into draw args, so the render pass sees the final
-post-birth/post-death state.
+post-birth/post-death/post-immigrant state.
 
 ## Render path
 
@@ -271,8 +281,9 @@ post-birth/post-death state.
 
 ## Robustness / ops
 
-- **Device loss:** handle `device.lost` with re-initialization; a long-running
-  flat-out GPU loop is a realistic trigger for driver resets.
+- **Device loss:** currently fatal. `device.lost` stops the app and surfaces the
+  error through the fatal-error path; browser/manual testing remains the runtime
+  target for now.
 - **Observability:** keep the default UI minimal: fps and simulation steps per
   second. When deeper controller analysis is needed, prefer temporary targeted
   diagnostics that can be removed after tuning.

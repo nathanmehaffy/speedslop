@@ -7,10 +7,9 @@
 // from the pure `Camera`; the renderer only consumes the resulting transform.
 
 import { AGENT_TRIANGLE_SIZE, BORDER_COLOR, CLEAR_COLOR, WORLD_SIZE } from "./config";
-import type { TileRange } from "./camera";
+import { MAX_VISIBLE_TILES, type TileOffset } from "./camera";
 import { AGENT_STRUCT_WGSL, DENSE_STRUCT_WGSL } from "./layout";
 
-const MAX_TILES = 1024;
 const TILE_STRIDE = 256; // min uniform buffer dynamic-offset alignment
 
 const SHADER = /* wgsl */ `
@@ -127,7 +126,7 @@ export class Renderer {
       label: "camera",
     });
     this.tileBuffer = device.createBuffer({
-      size: MAX_TILES * TILE_STRIDE,
+      size: MAX_VISIBLE_TILES * TILE_STRIDE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: "tiles",
     });
@@ -168,7 +167,7 @@ export class Renderer {
       fragment: { module, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "line-list" },
     });
-    this.tileScratch = new Uint8Array(new ArrayBuffer(MAX_TILES * TILE_STRIDE));
+    this.tileScratch = new Uint8Array(new ArrayBuffer(MAX_VISIBLE_TILES * TILE_STRIDE));
   }
 
   /** Update the camera transform and the per-tile offsets for this frame. */
@@ -177,7 +176,7 @@ export class Renderer {
     zoom: number,
     canvasWidth: number,
     canvasHeight: number,
-    tiles: TileRange,
+    offsets: readonly TileOffset[],
   ): void {
     const cam = new Float32Array(8);
     cam[0] = center.x;
@@ -187,7 +186,9 @@ export class Renderer {
     cam[4] = AGENT_TRIANGLE_SIZE;
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cam);
 
-    const offsets = this.collectTileOffsets(tiles);
+    if (offsets.length > MAX_VISIBLE_TILES) {
+      throw new Error(`renderer received ${offsets.length} tile offsets, but the budget is ${MAX_VISIBLE_TILES}`);
+    }
     this.tileCount = offsets.length;
     const view = new Float32Array(this.tileScratch.buffer);
     for (let i = 0; i < this.tileCount; i += 1) {
@@ -230,29 +231,5 @@ export class Renderer {
     }
 
     pass.end();
-  }
-
-  // Clamp the visible tile range to MAX_TILES around its centre so an extreme
-  // zoom-out cannot explode the draw-call count.
-  private collectTileOffsets(tiles: TileRange): Array<[number, number]> {
-    let { minX, maxX, minY, maxY } = tiles;
-    const side = Math.floor(Math.sqrt(MAX_TILES));
-    if (maxX - minX + 1 > side) {
-      const cx = Math.floor((minX + maxX) / 2);
-      minX = cx - Math.floor(side / 2);
-      maxX = minX + side - 1;
-    }
-    if (maxY - minY + 1 > side) {
-      const cy = Math.floor((minY + maxY) / 2);
-      minY = cy - Math.floor(side / 2);
-      maxY = minY + side - 1;
-    }
-    const offsets: Array<[number, number]> = [];
-    for (let ty = minY; ty <= maxY; ty += 1) {
-      for (let tx = minX; tx <= maxX; tx += 1) {
-        offsets.push([tx * WORLD_SIZE, ty * WORLD_SIZE]);
-      }
-    }
-    return offsets;
   }
 }

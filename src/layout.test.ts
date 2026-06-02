@@ -31,7 +31,7 @@ import {
   PLANNED_F32,
   SIM_PARAMS_BYTES,
 } from "./layout";
-import { buildSimulationParams } from "./simulation";
+import { buildSimulationParams } from "./simulationPacking";
 
 const NUM_CELLS = GRID_DIM * GRID_DIM;
 

@@ -33,7 +33,6 @@ interface PendingReadback {
 export class GpuProfiler {
   readonly querySet: GPUQuerySet;
 
-  private readonly device: GPUDevice;
   private readonly resolveBuffer: GPUBuffer;
   private readonly freeBuffers: GPUBuffer[] = [];
   private readonly pending: PendingReadback[] = [];
@@ -41,7 +40,6 @@ export class GpuProfiler {
   private fresh = false;
 
   constructor(device: GPUDevice) {
-    this.device = device;
     this.querySet = device.createQuerySet({ type: "timestamp", count: TIMESTAMP_COUNT });
     this.resolveBuffer = device.createBuffer({
       size: TIMESTAMP_BYTES,

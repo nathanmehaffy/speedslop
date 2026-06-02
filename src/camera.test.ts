@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { Camera, type Viewport } from "./camera";
+import { Camera, MAX_VISIBLE_TILES, clampTileRange, tileOffsetsForRange, type Viewport } from "./camera";
 import { WORLD_SIZE, ZOOM_IN_LIMIT, ZOOM_OUT_LIMIT } from "./config";
 
 const viewport: Viewport = { width: 800, height: 600 };
@@ -75,5 +75,25 @@ describe("Camera visibleTiles", () => {
     expect(tiles.maxX).toBeGreaterThan(0);
     expect(tiles.minY).toBeLessThan(0);
     expect(tiles.maxY).toBeGreaterThan(0);
+  });
+});
+
+describe("camera tile budgeting", () => {
+  it("clamps a large tile range to the max tile budget", () => {
+    const tiles = clampTileRange({ minX: -100, maxX: 100, minY: -100, maxY: 100 });
+    const width = tiles.maxX - tiles.minX + 1;
+    const height = tiles.maxY - tiles.minY + 1;
+
+    expect(width * height).toBeLessThanOrEqual(MAX_VISIBLE_TILES);
+  });
+
+  it("returns world-space offsets for the clamped tile range", () => {
+    const offsets = tileOffsetsForRange({ minX: -1, maxX: 1, minY: 0, maxY: 0 });
+
+    expect(offsets).toEqual([
+      [-WORLD_SIZE, 0],
+      [0, 0],
+      [WORLD_SIZE, 0],
+    ]);
   });
 });
