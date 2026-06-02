@@ -5,7 +5,6 @@ import {
   AGENT_MAX_SPEED,
   AGENT_MAX_TURN,
   AGENT_MIN_SPEED,
-  BRAIN_WEIGHT_COUNT,
   CONTACT_DOT,
   GRID_DIM,
   HEAD_ON_DOT,
@@ -15,7 +14,6 @@ import {
   MUTATION_RATE,
   MUTATION_SCALE,
   MUTATION_WEIGHT_LIMIT,
-  NEURAL_NEIGHBORS,
   SENSOR_RADIUS,
   SPEED_MUTATION_SCALE,
   STEP_DT,
@@ -67,12 +65,10 @@ describe("GPU layout contracts", () => {
     expect(f[12]).toBeCloseTo(SPEED_MUTATION_SCALE);
     expect(f[13]).toBeCloseTo(HUE_MUTATION_SCALE);
     expect(f[14]).toBeCloseTo(SENSOR_RADIUS);
-    expect(u[16]).toBe(MAX_AGENTS);
-    expect(u[17]).toBe(GRID_DIM);
-    expect(u[18]).toBe(NUM_CELLS);
-    expect(u[19]).toBe(NEURAL_NEIGHBORS);
-    expect(u[20]).toBe(BRAIN_WEIGHT_COUNT);
-    expect(u[21]).toBe(POPULATION_FLOOR);
+    expect(u[15]).toBe(MAX_AGENTS);
+    expect(u[16]).toBe(GRID_DIM);
+    expect(u[17]).toBe(NUM_CELLS);
+    expect(u[18]).toBe(POPULATION_FLOOR);
   });
 
   it("keeps the grid compatible with the single-workgroup prefix scan", () => {

@@ -178,15 +178,18 @@ export class Simulation {
       this.dispatch(pass, "resolveMates", this.agentWorkgroups);
       this.dispatch(pass, "commitAgents", this.agentWorkgroups);
 
-      this.rebuildIndex(pass, false);
+      // Childbirth and immigration only need a fresh free list plus the live
+      // count (maxAgents - freeCount); they never read the cell index, so a
+      // lightweight free-list refresh replaces a full counting-sort rebuild.
+      this.refreshFreeList(pass);
       this.dispatch(pass, "spawnChildren", this.agentWorkgroups);
 
-      this.rebuildIndex(pass, false);
+      this.refreshFreeList(pass);
       this.dispatch(pass, "spawnImmigrants", this.agentWorkgroups);
     }
 
-    // Rebuild the live index after movement, deaths, births, and immigrants so
-    // render sees final state and the indirect draw count is current.
+    // Rebuild the live index once after the batch so render sees final state and
+    // the indirect draw count is current.
     this.rebuildIndex(pass, false);
     this.dispatch(pass, "writeIndirect", 1);
     pass.end();
@@ -199,6 +202,11 @@ export class Simulation {
     this.dispatch(pass, "count", this.agentWorkgroups);
     this.dispatch(pass, "scan", 1);
     this.dispatch(pass, "scatter", this.agentWorkgroups);
+  }
+
+  private refreshFreeList(pass: GPUComputePassEncoder): void {
+    this.dispatch(pass, "clearFreeList", 1);
+    this.dispatch(pass, "gatherDead", this.agentWorkgroups);
   }
 
   private dispatch(pass: GPUComputePassEncoder, name: PipelineName, workgroups: number): void {

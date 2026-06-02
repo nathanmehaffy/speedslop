@@ -15,9 +15,11 @@ import { NUM_CELLS, SCAN_CHUNK, SCAN_WORKGROUP_SIZE, SENSOR_CELL_RADIUS, WORKGRO
 export const PIPELINE_NAMES = [
   "clearStep",
   "clearIndex",
+  "clearFreeList",
   "count",
   "scan",
   "scatter",
+  "gatherDead",
   "planMove",
   "chooseContacts",
   "resolveMates",
@@ -52,15 +54,11 @@ struct Params {
   speedMutationScale: f32,
   hueMutationScale: f32,
   sensorRadius: f32,
-  pad0: f32,
   maxAgents: u32,
   gridDim: u32,
   numCells: u32,
-  neuralNeighbors: u32,
-  brainWeightCount: u32,
   populationFloor: u32,
-  pad2: u32,
-  pad3: u32,
+  pad0: u32, // pads the uniform struct to a 16-byte multiple
 }
 
 ${AGENT_STRUCT_WGSL}
@@ -149,7 +147,7 @@ fn speedNorm(vel: f32) -> f32 {
 }
 
 fn writeRandomBrain(slot: u32, seed: u32) {
-  let base = slot * params.brainWeightCount;
+  let base = slot * ${BRAIN_WEIGHT_COUNT}u;
   for (var i = 0u; i < ${BRAIN_WEIGHT_COUNT}u; i = i + 1u) {
     let s = hash2(seed ^ i, slot);
     brains[base + i] = (randf(s) * 2.0 - 1.0) * 0.5;
@@ -177,7 +175,7 @@ fn squash(x: f32) -> f32 {
 }
 
 fn brainAt(slot: u32, weight: u32) -> f32 {
-  return brains[slot * params.brainWeightCount + weight];
+  return brains[slot * ${BRAIN_WEIGHT_COUNT}u + weight];
 }
 
 fn classifyImpact(a: Planned, b: Planned) -> vec4f {
@@ -223,6 +221,14 @@ fn clearIndex(@builtin(global_invocation_id) gid: vec3u) {
     atomicStore(&globals.freeCount, 0u);
     atomicStore(&globals.childCount, 0u);
   }
+}
+
+// Reset just the free-slot/child cursors ahead of a lightweight free-list
+// refresh (no cell histogram involved).
+@compute @workgroup_size(1)
+fn clearFreeList() {
+  atomicStore(&globals.freeCount, 0u);
+  atomicStore(&globals.childCount, 0u);
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -290,6 +296,21 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
   let d = atomicAdd(&cellCount[cellOf(a.pos)], 1u);
   dense[d].pos = a.pos;
   dense[d].slot = slot;
+}
+
+// Rebuild only the dead-slot free list (and free count) without the cell
+// histogram/scatter, for the childbirth and immigration phases that do not read
+// the spatial index. Requires clearFreeList to have reset the cursor first.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn gatherDead(@builtin(global_invocation_id) gid: vec3u) {
+  let slot = gid.x;
+  if (slot >= params.maxAgents) {
+    return;
+  }
+  if (agents[slot].alive != 1u) {
+    let f = atomicAdd(&globals.freeCount, 1u);
+    freeList[f] = slot;
+  }
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -454,9 +475,13 @@ fn chooseContacts(@builtin(global_invocation_id) gid: vec3u) {
             mateDist = distSq;
             mate = otherSlot;
           }
-        } else if (aImpact >= bImpact && aImpact >= params.contactDot && distSq < killDist) {
-          killDist = distSq;
-          killSelf = 1u;
+        } else if (aImpact >= params.contactDot && distSq < killDist) {
+          // The deeper impact is the aggressor and dies; ties break by slot so
+          // exactly one of a symmetric pair is removed.
+          if (aImpact > bImpact || (aImpact == bImpact && slot < otherSlot)) {
+            killDist = distSq;
+            killSelf = 1u;
+          }
         }
       }
     }
@@ -562,9 +587,9 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
   child.alive = 1u;
   child.id = pcg((childSlot * 2654435761u) ^ globals.step ^ t ^ seed);
 
-  let childBase = childSlot * params.brainWeightCount;
-  let aBase = event.parentA * params.brainWeightCount;
-  let bBase = event.parentB * params.brainWeightCount;
+  let childBase = childSlot * ${BRAIN_WEIGHT_COUNT}u;
+  let aBase = event.parentA * ${BRAIN_WEIGHT_COUNT}u;
+  let bBase = event.parentB * ${BRAIN_WEIGHT_COUNT}u;
   for (var i = 0u; i < ${BRAIN_WEIGHT_COUNT}u; i = i + 1u) {
     let wSeed = hash2(child.id ^ i, globals.step ^ t);
     let inherited = select(brains[bBase + i], brains[aBase + i], randf(wSeed) < 0.5);
@@ -581,7 +606,8 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn spawnImmigrants(@builtin(global_invocation_id) gid: vec3u) {
   let t = gid.x;
-  let live = atomicLoad(&globals.denseCount);
+  // Live count is implied by the free list: every slot is either alive or free.
+  let live = params.maxAgents - atomicLoad(&globals.freeCount);
   if (live >= params.populationFloor) {
     return;
   }

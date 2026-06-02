@@ -60,8 +60,6 @@ export class ThroughputController {
 
   private readonly deltas: number[] = [];
   private refreshMs = 16.6667;
-  private lastGpuMs: number | null = null;
-  private lastCpuMs: number | null = null;
   private frameCostMs: number | null = null;
 
   constructor(config: Partial<ControllerConfig> = {}) {
@@ -115,8 +113,6 @@ export class ThroughputController {
       return;
     }
 
-    this.lastGpuMs = gpu > 0 ? gpu : null;
-    this.lastCpuMs = cpu > 0 ? cpu : null;
     this.frameCostMs = gpu + cpu;
     if (!(ranSteps > 0) || !isFinite(ranSteps)) {
       return;
@@ -140,14 +136,6 @@ export class ThroughputController {
 
   get refreshEstimateMs(): number {
     return this.refreshMs;
-  }
-
-  get lastGpuTimeMs(): number | null {
-    return this.lastGpuMs;
-  }
-
-  get lastCpuTimeMs(): number | null {
-    return this.lastCpuMs;
   }
 
   get lastFrameCostMs(): number | null {

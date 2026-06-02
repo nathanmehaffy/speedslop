@@ -13,7 +13,6 @@ import {
   MUTATION_RATE,
   MUTATION_SCALE,
   MUTATION_WEIGHT_LIMIT,
-  NEURAL_NEIGHBORS,
   SENSOR_RADIUS,
   SPEED_MUTATION_SCALE,
   STEP_DT,
@@ -44,12 +43,10 @@ export const SIM_PARAM_F32 = {
 } as const;
 
 export const SIM_PARAM_U32 = {
-  maxAgents: 16,
-  gridDim: 17,
-  numCells: 18,
-  neuralNeighbors: 19,
-  brainWeightCount: 20,
-  populationFloor: 21,
+  maxAgents: 15,
+  gridDim: 16,
+  numCells: 17,
+  populationFloor: 18,
 } as const;
 
 export function initialAliveCount(): number {
@@ -78,8 +75,6 @@ export function buildSimulationParams(): ArrayBuffer {
   u[SIM_PARAM_U32.maxAgents] = MAX_AGENTS;
   u[SIM_PARAM_U32.gridDim] = GRID_DIM;
   u[SIM_PARAM_U32.numCells] = NUM_CELLS;
-  u[SIM_PARAM_U32.neuralNeighbors] = NEURAL_NEIGHBORS;
-  u[SIM_PARAM_U32.brainWeightCount] = BRAIN_WEIGHT_COUNT;
   u[SIM_PARAM_U32.populationFloor] = POPULATION_FLOOR;
   return buf;
 }

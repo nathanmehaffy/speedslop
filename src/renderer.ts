@@ -107,6 +107,7 @@ export class Renderer {
   private readonly bindGroup: GPUBindGroup;
   private readonly indirect: GPUBuffer;
   private readonly tileScratch: Uint8Array<ArrayBuffer>;
+  private readonly cameraScratch = new Float32Array(8);
 
   private tileCount = 0;
 
@@ -178,7 +179,7 @@ export class Renderer {
     canvasHeight: number,
     offsets: readonly TileOffset[],
   ): void {
-    const cam = new Float32Array(8);
+    const cam = this.cameraScratch;
     cam[0] = center.x;
     cam[1] = center.y;
     cam[2] = (2 * zoom) / canvasWidth;

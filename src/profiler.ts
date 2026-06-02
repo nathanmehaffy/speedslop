@@ -116,7 +116,11 @@ export class GpuProfiler {
       });
   }
 
-  /** Most recent completed timing sample, or null if none is new since last call. */
+  /**
+   * Latest completed timing sample, or null if none has completed since the
+   * last call. Samples complete in FIFO submission order (single in flight), so
+   * this is the most recently finished frame's measurement.
+   */
   takeSample(): TimingSample | null {
     if (!this.fresh) {
       return null;
