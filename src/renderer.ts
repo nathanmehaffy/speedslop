@@ -8,6 +8,7 @@
 
 import { AGENT_TRIANGLE_SIZE, BORDER_COLOR, CLEAR_COLOR, WORLD_SIZE } from "./config";
 import type { TileRange } from "./camera";
+import { AGENT_STRUCT_WGSL, DENSE_STRUCT_WGSL } from "./layout";
 
 const MAX_TILES = 1024;
 const TILE_STRIDE = 256; // min uniform buffer dynamic-offset alignment
@@ -24,22 +25,8 @@ struct Tile {
   pad: vec2f,
 }
 
-struct Agent {
-  pos: vec2f,
-  dir: f32,
-  vel: f32,
-  hue: f32,
-  sat: f32,
-  val: f32,
-  alive: u32,
-  id: u32,
-}
-
-struct Dense {
-  pos: vec2f,
-  slot: u32,
-  pad: u32,
-}
+${AGENT_STRUCT_WGSL}
+${DENSE_STRUCT_WGSL}
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> tile: Tile;
@@ -211,11 +198,16 @@ export class Renderer {
     }
   }
 
-  encode(encoder: GPUCommandEncoder, view: GPUTextureView): void {
+  encode(
+    encoder: GPUCommandEncoder,
+    view: GPUTextureView,
+    timestampWrites?: GPURenderPassTimestampWrites,
+  ): void {
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         { view, clearValue: CLEAR_COLOR, loadOp: "clear", storeOp: "store" },
       ],
+      timestampWrites,
     });
 
     pass.setPipeline(this.borderPipeline);

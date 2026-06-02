@@ -2,16 +2,21 @@ export interface TelemetrySample {
   elapsedMs: number;
   frames: number;
   steps: number;
+  gpuMs?: number | null;
 }
 
 export function renderTelemetry(sample: TelemetrySample): string {
   const fps = (sample.frames * 1000) / sample.elapsedMs;
   const stepsPerSecond = (sample.steps * 1000) / sample.elapsedMs;
 
-  return [
+  const lines = [
     `${fps.toFixed(1)} fps`,
     `${formatCount(stepsPerSecond)} sim steps/s`,
-  ].join("\n");
+  ];
+  if (sample.gpuMs != null) {
+    lines.push(`${sample.gpuMs.toFixed(2)} ms gpu`);
+  }
+  return lines.join("\n");
 }
 
 function formatCount(value: number): string {

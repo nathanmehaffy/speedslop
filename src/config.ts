@@ -3,20 +3,14 @@
 export const TELEMETRY_SAMPLE_MS = 500;
 export const MAX_DEVICE_PIXEL_RATIO = 2;
 
-export const CONTROLLER_WARMUP_FRAMES = 2;
-
 // Simulation ---------------------------------------------------------------
 
 // Fixed agent capacity. Every buffer is sized for this many slots; population
 // floats below it (see population sine params).
 export const MAX_AGENTS = 10_000;
 
-// Number of closest neighbours each agent senses. Drives the sensory buffer
-// stride and the future brain input layout.
-export const N_NEIGHBORS = 8;
-
 // Spatial grid resolution per axis. GRID_DIM^2 cells tile the unit world; sized
-// so each cell holds a few agents on average for cheap k-nearest queries.
+// so live agents can be compacted into a stable cell-sorted draw list.
 export const GRID_DIM = 64;
 
 // The world is the unit square, wrapped at the edges (a torus).

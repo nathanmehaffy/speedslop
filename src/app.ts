@@ -1,12 +1,8 @@
 import { Camera, type Viewport } from "./camera";
-import {
-  CONTROLLER_WARMUP_FRAMES,
-  MAX_AGENTS,
-  MAX_DEVICE_PIXEL_RATIO,
-  TELEMETRY_SAMPLE_MS,
-} from "./config";
+import { MAX_DEVICE_PIXEL_RATIO, TELEMETRY_SAMPLE_MS } from "./config";
 import { ThroughputController } from "./controller";
 import { initGpu, installGpuErrorHandlers, resizeCanvas } from "./gpu";
+import { GpuProfiler } from "./profiler";
 import { Renderer } from "./renderer";
 import { Simulation } from "./simulation";
 import { renderTelemetry } from "./telemetry";
@@ -27,7 +23,7 @@ export interface RunningApp {
 export async function startApp(elements: AppElements, options: AppOptions): Promise<RunningApp> {
   const { canvas, monitor } = elements;
   const { device, context, format } = await initGpu(canvas);
-  const simulation = new Simulation(device, MAX_AGENTS);
+  const simulation = new Simulation(device);
   const renderer = new Renderer(
     device,
     format,
@@ -35,7 +31,8 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     simulation.denseBuffer,
     simulation.indirectBuffer,
   );
-  const controller = new ThroughputController({ warmupFrames: CONTROLLER_WARMUP_FRAMES });
+  const controller = new ThroughputController();
+  const profiler = new GpuProfiler(device);
   const camera = new Camera();
   let cameraFitted = false;
 
@@ -74,9 +71,17 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     }
 
     try {
-      const steps = decideSteps(controller, timestamp, lastTimestamp, started);
+      const sample = profiler.takeSample();
+      if (sample) {
+        controller.recordGpuTime(sample.gpuMs, sample.steps);
+      }
+      if (started) {
+        controller.recordFrameDelta(timestamp - lastTimestamp);
+      }
       started = true;
       lastTimestamp = timestamp;
+
+      const steps = controller.nextSteps();
 
       resizeCanvas(canvas, MAX_DEVICE_PIXEL_RATIO);
       const viewport: Viewport = {
@@ -91,10 +96,12 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
       renderer.update(camera.center, camera.zoom, viewport.width, viewport.height, camera.visibleTiles(viewport));
 
       const encoder = device.createCommandEncoder();
-      simulation.encode(encoder, steps);
+      simulation.encode(encoder, steps, steps > 0 ? profiler.computePassWrites() : undefined);
       const view = context.getCurrentTexture().createView();
-      renderer.encode(encoder, view);
+      renderer.encode(encoder, view, profiler.renderPassWrites(steps > 0));
+      profiler.resolve(encoder, steps);
       device.queue.submit([encoder.finish()]);
+      profiler.poll();
 
       windowFrames += 1;
       windowSteps += steps;
@@ -104,6 +111,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
           elapsedMs: elapsed,
           frames: windowFrames,
           steps: windowSteps,
+          gpuMs: controller.lastGpuTimeMs,
         });
         windowStart = timestamp;
         windowFrames = 0;
@@ -169,18 +177,4 @@ function attachCameraControls(canvas: HTMLCanvasElement, camera: Camera): () => 
     canvas.removeEventListener("pointerleave", onPointerUp);
     canvas.removeEventListener("wheel", onWheel);
   };
-}
-
-function decideSteps(
-  controller: ThroughputController,
-  timestamp: number,
-  lastTimestamp: number,
-  started: boolean,
-): number {
-  if (!started) {
-    return controller.bootstrap();
-  }
-
-  const decision = controller.recordFrame(timestamp - lastTimestamp);
-  return decision.steps;
 }

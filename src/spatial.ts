@@ -1,8 +1,8 @@
 // Pure spatial/demographic math shared as a CPU oracle for the GPU shaders.
 //
-// These functions are mirrored verbatim by WGSL in `simulation.ts`. Keeping a
-// tested TypeScript reference lets the invariants (cell indexing, toroidal
-// distance, population target) be checked without a GPU.
+// These functions mirror small shader-side invariants. Keeping a tested
+// TypeScript reference lets cell indexing, toroidal distance, and population
+// target math be checked without a GPU.
 
 import {
   GRID_DIM,

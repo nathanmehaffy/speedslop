@@ -31,16 +31,28 @@ body {
 
 #error-panel {
   position: fixed;
-  right: 12px;
-  bottom: 12px;
-  z-index: 2;
-  max-width: min(520px, calc(100% - 24px));
-  padding: 10px 12px;
-  font: 13px/1.4 system-ui, sans-serif;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  text-align: center;
+  font: 16px/1.6 system-ui, sans-serif;
   color: #ffe3e3;
-  background: rgba(84, 10, 20, 0.9);
-  border: 1px solid rgba(255, 168, 168, 0.45);
-  border-radius: 8px;
+  background: rgba(5, 8, 16, 0.94);
+  white-space: pre-wrap;
+}
+
+#error-panel::before {
+  content: "SpeedSlop can't start";
+  position: absolute;
+  top: max(32px, 18vh);
+  left: 0;
+  right: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: #ff9a9a;
 }
 
 [hidden] {

@@ -24,10 +24,10 @@ function showFatalError(errorPanel: HTMLElement | null, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   if (errorPanel) {
     errorPanel.hidden = false;
-    errorPanel.textContent = `WebGPU error: ${message}`;
+    errorPanel.textContent = message;
     return;
   }
-  document.body.textContent = `WebGPU error: ${message}`;
+  document.body.textContent = `SpeedSlop can't start: ${message}`;
 }
 
 main().catch((error: unknown) => {

@@ -1,302 +1,182 @@
 import { describe, expect, it } from "vitest";
 
-import { ThroughputController, type FrameDecision } from "./controller";
+import { ThroughputController } from "./controller";
 
 describe("ThroughputController", () => {
   it("spreads fractional rates across frames", () => {
-    const controller = new ThroughputController({
-      rateInitial: 0.25,
-      acquireFactor: 1,
-      warmupFrames: 0,
-      probeFactor: 1,
-    });
+    const controller = new ThroughputController({ rateInitial: 0.25 });
 
-    expect(controller.bootstrap()).toBe(0);
-    expect(controller.recordFrame(16).steps).toBe(0);
-    expect(controller.recordFrame(16).steps).toBe(0);
-    expect(controller.recordFrame(16).steps).toBe(1);
+    expect(controller.nextSteps()).toBe(0);
+    expect(controller.nextSteps()).toBe(0);
+    expect(controller.nextSteps()).toBe(0);
+    expect(controller.nextSteps()).toBe(1);
   });
 
-  it("ignores startup spikes during warmup", () => {
-    const controller = new ThroughputController({
-      rateInitial: 10,
-      acquireFactor: 1,
-      acquireBackoff: 0.5,
-      warmupFrames: 2,
-      probeFactor: 1,
-    });
+  it("estimates refresh from a low percentile of recent deltas", () => {
+    const controller = new ThroughputController({ refreshPercentile: 0.2 });
 
-    controller.bootstrap();
-    const first = controller.recordFrame(80);
-    const second = controller.recordFrame(80);
-
-    expect(first.dropped).toBe(false);
-    expect(second.dropped).toBe(false);
-    expect(second.phase).toBe("acquire");
-    expect(second.rate).toBeCloseTo(10);
-  });
-
-  it("ignores invalid deltas without advancing controller state", () => {
-    const controller = new ThroughputController({
-      rateInitial: 1,
-      acquireFactor: 2,
-      warmupFrames: 0,
-      probeFactor: 1,
-    });
-
-    controller.bootstrap();
-    const decision = controller.recordFrame(Number.NaN);
-
-    expect(decision.rate).toBe(1);
-    expect(decision.phase).toBe("acquire");
-    expect(decision.dropped).toBe(false);
-  });
-
-  it("ignores long browser pauses without advancing controller state", () => {
-    const controller = new ThroughputController({
-      rateInitial: 1,
-      acquireFactor: 2,
-      warmupFrames: 0,
-      probeFactor: 1,
-      maxPauseDeltaMs: 250,
-    });
-
-    controller.bootstrap();
-    const decision = controller.recordFrame(4_000);
-
-    expect(decision.rate).toBe(1);
-    expect(decision.phase).toBe("acquire");
-    expect(decision.dropped).toBe(false);
-    expect(controller.refreshEstimateMs).toBeCloseTo(16.6667);
-  });
-
-  it("keeps refresh estimation anchored to fast frame deltas", () => {
-    const controller = new ThroughputController({
-      refreshPercentile: 0.2,
-      warmupFrames: 0,
-      probeFactor: 1,
-    });
-
-    controller.recordFrame(16);
-    controller.recordFrame(17);
-    controller.recordFrame(50);
+    controller.recordFrameDelta(16);
+    controller.recordFrameDelta(17);
+    controller.recordFrameDelta(50);
 
     expect(controller.refreshEstimateMs).toBe(16);
   });
 
-  it("backs off and enters tracking when acquisition observes a drop", () => {
+  it("ignores invalid and long-pause deltas when estimating refresh", () => {
+    const controller = new ThroughputController({ refreshPercentile: 0, maxPauseDeltaMs: 250 });
+
+    controller.recordFrameDelta(16);
+    controller.recordFrameDelta(Number.NaN);
+    controller.recordFrameDelta(-5);
+    controller.recordFrameDelta(4_000);
+
+    expect(controller.refreshEstimateMs).toBe(16);
+  });
+
+  it("does not let a stall inflate the refresh estimate", () => {
+    const controller = new ThroughputController({ refreshPercentile: 0 });
+    for (let i = 0; i < 10; i += 1) {
+      controller.recordFrameDelta(16);
+    }
+    expect(controller.refreshEstimateMs).toBe(16);
+
+    // A burst of slow frames (e.g. a context menu or notification) must not
+    // raise the estimate, which would inflate the budget and trap the loop.
+    for (let i = 0; i < 80; i += 1) {
+      controller.recordFrameDelta(80);
+    }
+
+    expect(controller.refreshEstimateMs).toBe(16);
+  });
+
+  it("does not treat GPU-bound frames as refresh samples", () => {
+    const controller = new ThroughputController({ refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    // GPU work nearly fills the frame: the delta reflects our own load, not the
+    // display refresh, so it must be rejected as a refresh sample.
+    controller.recordGpuTime(20, 100);
+    controller.recordFrameDelta(22);
+
+    expect(controller.refreshEstimateMs).toBe(16);
+  });
+
+  it("still adopts a faster refresh interval", () => {
+    const controller = new ThroughputController({ refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    for (let i = 0; i < 5; i += 1) {
+      controller.recordFrameDelta(8);
+    }
+
+    expect(controller.refreshEstimateMs).toBe(8);
+  });
+
+  it("raises the rate when GPU time is under budget", () => {
+    const controller = new ThroughputController({ rateInitial: 10, refreshPercentile: 0 });
+    controller.recordFrameDelta(16); // refresh = 16 -> budget = 13.6 ms
+
+    controller.recordGpuTime(6.8, 10); // half the budget
+
+    expect(controller.currentRate).toBeGreaterThan(10);
+    expect(controller.lastGpuTimeMs).toBe(6.8);
+  });
+
+  it("lowers the rate when GPU time is over budget", () => {
+    const controller = new ThroughputController({ rateInitial: 10, refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    controller.recordGpuTime(27.2, 10); // double the budget
+
+    expect(controller.currentRate).toBeLessThan(10);
+  });
+
+  it("holds the rate when GPU time matches the budget", () => {
+    const controller = new ThroughputController({ rateInitial: 10, refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    controller.recordGpuTime(16 * 0.85, 10); // exactly the budget
+
+    expect(controller.currentRate).toBeCloseTo(10);
+  });
+
+  it("clamps a single sample to the maximum step factor", () => {
     const controller = new ThroughputController({
       rateInitial: 10,
-      acquireFactor: 1,
-      acquireBackoff: 0.5,
-      warmupFrames: 0,
       refreshPercentile: 0,
-      probeFactor: 1,
+      smoothing: 1,
+      maxStepFactor: 8,
     });
+    controller.recordFrameDelta(16);
 
-    enterTrack(controller);
-    const decision = controller.recordFrame(16);
+    controller.recordGpuTime(0.0001, 10); // wildly under budget
 
-    expect(decision.phase).toBe("track");
-    expect(decision.rate).toBeCloseTo(5);
+    expect(controller.currentRate).toBeCloseTo(80); // 10 * maxStepFactor, not larger
   });
 
-  it("raises rate after clean tracking batches", () => {
+  it("uses the integer step count that produced a GPU sample", () => {
     const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.1,
+      rateInitial: 0.25,
+      refreshPercentile: 0,
+      smoothing: 1,
+      maxStepFactor: 100,
     });
-    const baseRate = enterTrack(controller);
+    controller.recordFrameDelta(16);
 
-    const decision = runFrames(controller, 4, 16);
+    controller.recordGpuTime(16 * 0.85, 1);
 
-    expect(decision.phase).toBe("track");
-    expect(decision.pHat).toBe(0);
-    expect(decision.rate).toBeGreaterThan(baseRate);
+    expect(controller.currentRate).toBeCloseTo(1);
   });
 
-  it("lowers rate after high-drop tracking batches", () => {
-    const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.1,
-      overloadThreshold: 999,
-    });
-    const baseRate = enterTrack(controller);
+  it("converges toward the budget operating point over repeated samples", () => {
+    const controller = new ThroughputController({ rateInitial: 1, refreshPercentile: 0 });
+    controller.recordFrameDelta(16); // budget = 13.6 ms
 
-    const decision = runFrames(controller, 4, 50);
-
-    expect(decision.phase).toBe("track");
-    expect(decision.pHat).toBe(1);
-    expect(decision.rate).toBeLessThan(baseRate);
-  });
-
-  it("detects overload and enters recovery", () => {
-    const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.01,
-      overloadDropRate: 0.5,
-      overloadThreshold: 2,
-      crashFactor: 0.5,
-      recoverFrames: 1,
-    });
-    const baseRate = enterTrack(controller);
-
-    const overload = controller.recordFrame(50);
-    const recovered = controller.recordFrame(16);
-
-    expect(overload.regime).toBe("overload");
-    expect(overload.phase).toBe("recover");
-    expect(overload.rate).toBeCloseTo(baseRate * 0.5);
-    expect(recovered.phase).toBe("track");
-  });
-
-  it("suppresses repeated overload crashes during the recovery dwell", () => {
-    const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.01,
-      overloadDropRate: 0.5,
-      overloadThreshold: 2,
-      crashFactor: 0.5,
-      recoverFrames: 4,
-    });
-    const baseRate = enterTrack(controller);
-
-    const overload = controller.recordFrame(50);
-    const duringRecovery = runFrames(controller, 3, 50);
-
-    expect(overload.regime).toBe("overload");
-    expect(duringRecovery.regime).toBe("none");
-    expect(duringRecovery.phase).toBe("recover");
-    expect(duringRecovery.rate).toBeCloseTo(baseRate * 0.5);
-  });
-
-  it("regains rate quickly after clean recovery windows", () => {
-    const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.01,
-      trackWindowFrames: 2,
-      trackGain: 0,
-      trackGainFloor: 0,
-      overloadDropRate: 0.5,
-      overloadThreshold: 2,
-      crashFactor: 0.5,
-      recoverFrames: 1,
-      recoveryGrowthFactor: 2,
-    });
-    const baseRate = enterTrack(controller);
-
-    const overload = controller.recordFrame(50);
-    controller.recordFrame(16);
-    const recovered = runFrames(controller, 2, 16);
-
-    expect(overload.rate).toBeCloseTo(baseRate * 0.5);
-    expect(recovered.phase).toBe("track");
-    expect(recovered.rate).toBeCloseTo(baseRate);
-  });
-
-  it("accepts a clean active headroom probe", () => {
-    const controller = new ThroughputController(probeTestConfig());
-    const baseRate = enterTrack(controller);
-
-    const started = runFrames(controller, 2, 16);
-    const accepted = runFrames(controller, 3, 16);
-
-    expect(started.phase).toBe("probe");
-    expect(started.probeStatus).toBe("running");
-    expect(accepted.regime).toBe("headroom");
-    expect(accepted.probeStatus).toBe("accepted");
-    expect(accepted.phase).toBe("track");
-    expect(accepted.rate).toBeGreaterThan(baseRate);
-  });
-
-  it("rejects a probe with a dropped frame and restores the previous rate", () => {
-    const controller = new ThroughputController(probeTestConfig());
-    const baseRate = enterTrack(controller);
-
-    runFrames(controller, 2, 16);
-    const rejected = controller.recordFrame(50);
-
-    expect(rejected.probeStatus).toBe("rejected");
-    expect(rejected.phase).toBe("track");
-    expect(rejected.rate).toBeCloseTo(baseRate);
-  });
-
-  it("waits for the configured clean tracking-window streak before probing", () => {
-    const controller = new ThroughputController({
-      ...probeTestConfig(),
-      probeCleanWindows: 2,
-    });
-
-    enterTrack(controller);
-    const firstCleanWindow = runFrames(controller, 2, 16);
-    const secondCleanWindow = runFrames(controller, 2, 16);
-
-    expect(firstCleanWindow.phase).toBe("track");
-    expect(firstCleanWindow.probeStatus).toBe("idle");
-    expect(secondCleanWindow.phase).toBe("probe");
-    expect(secondCleanWindow.probeStatus).toBe("running");
-  });
-
-  it("does not create passive headroom resets when probes are disabled", () => {
-    const controller = new ThroughputController({
-      ...trackTestConfig(),
-      targetDropRate: 0.1,
-      probeFactor: 1,
-    });
-    enterTrack(controller);
-
-    for (let i = 0; i < 500; i += 1) {
-      const decision = controller.recordFrame(16);
-      expect(decision.regime).toBe("none");
-      expect(decision.phase).toBe("track");
+    // Linear cost model: 0.5 ms fixed overhead + 0.05 ms per step. The budget
+    // operating point is (13.6 - 0.5) / 0.05 = 262 steps/frame.
+    for (let i = 0; i < 200; i += 1) {
+      const rate = controller.currentRate;
+      const gpuMs = 0.5 + 0.05 * rate;
+      controller.recordGpuTime(gpuMs, Math.max(1, Math.round(rate)));
     }
+
+    expect(controller.currentRate).toBeGreaterThan(230);
+    expect(controller.currentRate).toBeLessThan(290);
+  });
+
+  it("ignores non-positive GPU measurements", () => {
+    const controller = new ThroughputController({ rateInitial: 10, refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    controller.recordGpuTime(0, 10);
+    controller.recordGpuTime(-3, 10);
+
+    expect(controller.currentRate).toBeCloseTo(10);
+    expect(controller.lastGpuTimeMs).toBeNull();
+  });
+
+  it("clamps the rate to the configured bounds", () => {
+    const controller = new ThroughputController({
+      rateInitial: 10,
+      rateMax: 12,
+      refreshPercentile: 0,
+      smoothing: 1,
+      maxStepFactor: 100,
+    });
+    controller.recordFrameDelta(16);
+
+    controller.recordGpuTime(0.001, 10); // would explode without the bound
+
+    expect(controller.currentRate).toBeCloseTo(12);
+  });
+
+  it("records render-only GPU measurements without changing the rate", () => {
+    const controller = new ThroughputController({ rateInitial: 0.25, refreshPercentile: 0 });
+    controller.recordFrameDelta(16);
+
+    controller.recordGpuTime(1, 0);
+
+    expect(controller.currentRate).toBeCloseTo(0.25);
+    expect(controller.lastGpuTimeMs).toBe(1);
   });
 });
-
-function trackTestConfig(): ConstructorParameters<typeof ThroughputController>[0] {
-  return {
-    rateInitial: 10,
-    acquireFactor: 1,
-    acquireBackoff: 1,
-    warmupFrames: 0,
-    refreshPercentile: 0,
-    trackWindowFrames: 4,
-    trackGain: 0.5,
-    trackGainFloor: 0.5,
-    probeFactor: 1,
-  };
-}
-
-function probeTestConfig(): ConstructorParameters<typeof ThroughputController>[0] {
-  return {
-    ...trackTestConfig(),
-    targetDropRate: 0.1,
-    trackWindowFrames: 2,
-    trackGain: 0,
-    trackGainFloor: 0,
-    overloadThreshold: 999,
-    probeFactor: 1.1,
-    probeFrames: 3,
-    probeCooldownFrames: 0,
-    probeMinTrackFrames: 2,
-    probeDropMargin: 0.05,
-    probeMaxOverloadScore: 999,
-    probeCleanWindows: 1,
-  };
-}
-
-function enterTrack(controller: ThroughputController): number {
-  controller.bootstrap();
-  controller.recordFrame(16);
-  const decision = controller.recordFrame(50);
-  expect(decision.phase).toBe("track");
-  return decision.rate;
-}
-
-function runFrames(controller: ThroughputController, count: number, deltaMs: number): FrameDecision {
-  let decision = controller.recordFrame(deltaMs);
-  for (let i = 1; i < count; i += 1) {
-    decision = controller.recordFrame(deltaMs);
-  }
-  return decision;
-}

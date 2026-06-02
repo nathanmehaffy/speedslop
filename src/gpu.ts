@@ -8,15 +8,25 @@ export interface GpuContext {
 
 export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
   if (!navigator.gpu) {
-    throw new Error("WebGPU is not available in this browser");
+    throw new Error(
+      "WebGPU is not available in this browser. SpeedSlop needs a WebGPU-capable browser (recent Chrome, Edge, or Firefox Nightly).",
+    );
   }
 
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) {
-    throw new Error("No WebGPU adapter found");
+    throw new Error("No WebGPU adapter found. SpeedSlop requires a working GPU.");
   }
 
-  const device = await adapter.requestDevice();
+  // The throughput controller is driven entirely by GPU timestamp readings, so
+  // the feature is mandatory: there is no blind/timing-free fallback path.
+  if (!adapter.features.has("timestamp-query")) {
+    throw new Error(
+      'This GPU/browser does not expose the WebGPU "timestamp-query" feature, which SpeedSlop requires to measure GPU frame time. Try a recent Chrome or Edge build (enable "Unsafe WebGPU" if needed).',
+    );
+  }
+
+  const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
 
   const context = canvas.getContext("webgpu");
   if (!context) {
