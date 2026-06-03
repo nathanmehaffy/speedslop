@@ -6,12 +6,16 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "bench": "npm run bench:cpu && npm run bench:gpu",
+    "bench:cpu": "vitest bench src/benchmark/cpu.bench.ts --run",
+    "bench:gpu": "node scripts/bench-gpu.mjs",
     "check": "tsc --noEmit && vitest run",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.60",
+    "playwright": "^1.60.0",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
     "vitest": "^4.1.8"

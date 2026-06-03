@@ -39,11 +39,22 @@ npm install
 npm run dev
 npm run build
 npm run check
+npm run bench
 ```
 
 Unless specifically asked, do not run `npm run dev` yourself to start a dev server for the developer; the developer will do this manually in their own terminal window.
 
 `npm run check` must pass for ordinary changes. `npm run build` should pass for frontend or shader changes. The developer always runs in-browser testing manually, and agents should not use browser control tools to attempt their own in-browser testing, unless specifically using a headless browser for scripted correctness or performance tests.
+
+For optimization work, use the fixed-workload benchmark scripts rather than the live app's adaptive controller:
+
+```powershell
+npm run bench:cpu
+npm run bench:gpu
+npm run bench:gpu -- --samples=50 --warmup=10 --steps=1,8,32,128
+```
+
+The primary GPU optimization signal is `sim-only` median GPU time, with `sim-plus-render` used to catch whole-frame regressions. The GPU benchmark launches a headless Playwright browser against a temporary Vite server and requires WebGPU `timestamp-query`.
 
 ## Engineering Preferences
 

@@ -7,8 +7,8 @@ import {
   WORLD_SIZE,
 } from "./config";
 
-export const WORKGROUP_SIZE = 64;
-export const SCAN_WORKGROUP_SIZE = 256;
+export const WORKGROUP_SIZE = 8;
+export const SCAN_WORKGROUP_SIZE = 96;
 export const NUM_CELLS = GRID_DIM * GRID_DIM;
 export const SCAN_CHUNK = NUM_CELLS / SCAN_WORKGROUP_SIZE;
 export const CELL_WIDTH = WORLD_SIZE / GRID_DIM;

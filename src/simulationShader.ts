@@ -1,8 +1,10 @@
 import {
   BRAIN_WEIGHT_COUNT,
+  GRID_DIM,
   NEURAL_HIDDEN,
   NEURAL_INPUTS,
   NEURAL_NEIGHBORS,
+  WORLD_SIZE,
 } from "./config";
 import {
   AGENT_STRUCT_WGSL,
@@ -10,7 +12,13 @@ import {
   DENSE_STRUCT_WGSL,
   PLANNED_STRUCT_WGSL,
 } from "./layout";
-import { NUM_CELLS, SCAN_CHUNK, SCAN_WORKGROUP_SIZE, SENSOR_CELL_RADIUS, WORKGROUP_SIZE } from "./simulationPolicy";
+import {
+  NUM_CELLS,
+  SCAN_CHUNK,
+  SCAN_WORKGROUP_SIZE,
+  SENSOR_CELL_RADIUS,
+  WORKGROUP_SIZE,
+} from "./simulationPolicy";
 
 export const PIPELINE_NAMES = [
   "clearStep",
@@ -30,6 +38,9 @@ export const SHADER = /* wgsl */ `
 const NUM_CELLS: u32 = ${NUM_CELLS}u;
 const SCAN_CHUNK: u32 = ${SCAN_CHUNK}u;
 const SENSOR_CELL_RADIUS: i32 = ${SENSOR_CELL_RADIUS};
+const GRID_DIM: u32 = ${GRID_DIM}u;
+const WORLD_SIZE: f32 = ${WORLD_SIZE};
+const INV_WORLD_SIZE: f32 = ${1 / WORLD_SIZE};
 const TWO_PI: f32 = 6.28318530717958647;
 const NO_TARGET: u32 = 0xffffffffu;
 
@@ -63,7 +74,6 @@ ${BIRTH_EVENT_STRUCT_WGSL}
 
 struct Meta {
   step: u32,
-  denseCount: atomic<u32>,
   freeCount: atomic<u32>,
   birthCount: atomic<u32>,
   childCount: atomic<u32>,
@@ -78,7 +88,7 @@ struct Meta {
 @group(0) @binding(6) var<storage, read_write> freeList: array<u32>;
 @group(0) @binding(7) var<storage, read_write> brains: array<f32>;
 @group(0) @binding(8) var<storage, read_write> planned: array<Planned>;
-@group(0) @binding(9) var<storage, read_write> killMarks: array<atomic<u32>>;
+@group(0) @binding(9) var<storage, read_write> killMarks: array<u32>;
 @group(0) @binding(10) var<storage, read_write> mateTargets: array<u32>;
 @group(0) @binding(11) var<storage, read_write> birthEvents: array<BirthEvent>;
 
@@ -96,32 +106,40 @@ fn randf(seed: u32) -> f32 {
   return f32(pcg(seed)) * (1.0 / 4294967296.0);
 }
 
+fn unitFromBits(bits: u32) -> f32 {
+  return f32(bits) * (1.0 / 4294967296.0);
+}
+
+fn unit16(bits: u32) -> f32 {
+  return f32(bits & 0xffffu) * (1.0 / 65536.0);
+}
+
 fn wrapPos(p: vec2f) -> vec2f {
-  return p - floor(p / params.worldSize) * params.worldSize;
+  return p - floor(p * INV_WORLD_SIZE) * WORLD_SIZE;
 }
 
 fn torusDelta(a: vec2f, b: vec2f) -> vec2f {
   var d = b - a;
-  d = d - params.worldSize * round(d / params.worldSize);
+  d = d - WORLD_SIZE * round(d * INV_WORLD_SIZE);
   return d;
 }
 
 fn cellCoord(p: vec2f) -> vec2u {
-  let dim = f32(params.gridDim);
-  var cx = i32(floor(p.x / params.worldSize * dim));
-  var cy = i32(floor(p.y / params.worldSize * dim));
-  cx = clamp(cx, 0, i32(params.gridDim) - 1);
-  cy = clamp(cy, 0, i32(params.gridDim) - 1);
+  let dim = f32(GRID_DIM);
+  var cx = i32(floor(p.x * INV_WORLD_SIZE * dim));
+  var cy = i32(floor(p.y * INV_WORLD_SIZE * dim));
+  cx = clamp(cx, 0, i32(GRID_DIM) - 1);
+  cy = clamp(cy, 0, i32(GRID_DIM) - 1);
   return vec2u(u32(cx), u32(cy));
 }
 
 fn cellOf(p: vec2f) -> u32 {
   let c = cellCoord(p);
-  return c.y * params.gridDim + c.x;
+  return c.y * GRID_DIM + c.x;
 }
 
 fn wrapCell(c: i32) -> u32 {
-  let dim = i32(params.gridDim);
+  let dim = i32(GRID_DIM);
   var v = c;
   if (v < 0) {
     v = v + dim;
@@ -133,7 +151,7 @@ fn wrapCell(c: i32) -> u32 {
 }
 
 fn wrappedCellOf(cx: i32, cy: i32) -> u32 {
-  return wrapCell(cy) * params.gridDim + wrapCell(cx);
+  return wrapCell(cy) * GRID_DIM + wrapCell(cx);
 }
 
 fn speedNorm(vel: f32) -> f32 {
@@ -142,21 +160,26 @@ fn speedNorm(vel: f32) -> f32 {
 
 fn writeRandomBrain(slot: u32, seed: u32) {
   let base = slot * ${BRAIN_WEIGHT_COUNT}u;
+  var rng = seed ^ (slot * 0x9e3779b9u);
   for (var i = 0u; i < ${BRAIN_WEIGHT_COUNT}u; i = i + 1u) {
-    let s = hash2(seed ^ i, slot);
-    brains[base + i] = (randf(s) * 2.0 - 1.0) * 0.5;
+    rng = pcg(rng + i);
+    brains[base + i] = (unitFromBits(rng) * 2.0 - 1.0) * 0.5;
   }
 }
 
 fn spawnRandomAgent(slot: u32, seed: u32) -> Agent {
-  let s0 = hash2(seed, slot ^ 0x85ebca6bu);
-  let s1 = hash2(seed ^ 0x632be5abu, slot);
-  let s2 = hash2(seed ^ 0x85157af5u, globals.step);
+  var rng = hash2(seed, slot ^ 0x85ebca6bu);
   var a: Agent;
-  a.pos = vec2f(randf(s0) * params.worldSize, randf(s0 ^ 0x27d4eb2du) * params.worldSize);
-  a.dir = randf(s1) * TWO_PI;
-  a.vel = params.minSpeed + randf(s1 ^ 0x165667b1u) * (params.maxSpeed - params.minSpeed);
-  a.hue = randf(s2);
+  rng = pcg(rng);
+  a.pos.x = unitFromBits(rng) * WORLD_SIZE;
+  rng = pcg(rng ^ 0x27d4eb2du);
+  a.pos.y = unitFromBits(rng) * WORLD_SIZE;
+  rng = pcg(rng ^ 0x632be5abu);
+  a.dir = unitFromBits(rng) * TWO_PI;
+  rng = pcg(rng ^ 0x165667b1u);
+  a.vel = params.minSpeed + unitFromBits(rng) * (params.maxSpeed - params.minSpeed);
+  rng = pcg(rng ^ 0x85157af5u ^ globals.step);
+  a.hue = unitFromBits(rng);
   a.sat = 0.85;
   a.val = 1.0;
   a.alive = 1u;
@@ -194,7 +217,7 @@ fn clearStep(@builtin(global_invocation_id) gid: vec3u) {
     atomicStore(&cellCount[i], 0u);
   }
   if (i < params.maxAgents) {
-    atomicStore(&killMarks[i], 0u);
+    killMarks[i] = 0u;
     mateTargets[i] = NO_TARGET;
   }
   if (i == 0u) {
@@ -244,7 +267,6 @@ fn scan(@builtin(local_invocation_index) lid: u32) {
       acc = acc + blockSum[i];
     }
     cellStart[NUM_CELLS] = acc;
-    atomicStore(&globals.denseCount, acc);
   }
   workgroupBarrier();
 
@@ -302,49 +324,57 @@ fn planMove(@builtin(global_invocation_id) gid: vec3u) {
         if (otherSlot == slot) {
           continue;
         }
-        let other = agents[otherSlot];
-        if (other.alive != 1u) {
-          continue;
-        }
         let delta = torusDelta(a.pos, dense[di].pos);
         let distSq = dot(delta, delta);
         if (distSq > sensorRadiusSq) {
           continue;
         }
-        var insertAt = ${NEURAL_NEIGHBORS}u;
-        for (var k = 0u; k < ${NEURAL_NEIGHBORS}u; k = k + 1u) {
-          if (distSq < bestDist[k]) {
-            insertAt = k;
-            break;
-          }
-        }
-        if (insertAt < ${NEURAL_NEIGHBORS}u) {
-          var k = ${NEURAL_NEIGHBORS - 1}u;
-          loop {
-            if (k <= insertAt) {
-              break;
+        if (distSq < bestDist[3]) {
+          if (distSq < bestDist[1]) {
+            if (distSq < bestDist[0]) {
+              bestDist[3] = bestDist[2];
+              bestSlot[3] = bestSlot[2];
+              bestDist[2] = bestDist[1];
+              bestSlot[2] = bestSlot[1];
+              bestDist[1] = bestDist[0];
+              bestSlot[1] = bestSlot[0];
+              bestDist[0] = distSq;
+              bestSlot[0] = otherSlot;
+            } else {
+              bestDist[3] = bestDist[2];
+              bestSlot[3] = bestSlot[2];
+              bestDist[2] = bestDist[1];
+              bestSlot[2] = bestSlot[1];
+              bestDist[1] = distSq;
+              bestSlot[1] = otherSlot;
             }
-            bestDist[k] = bestDist[k - 1u];
-            bestSlot[k] = bestSlot[k - 1u];
-            k = k - 1u;
+          } else if (distSq < bestDist[2]) {
+            bestDist[3] = bestDist[2];
+            bestSlot[3] = bestSlot[2];
+            bestDist[2] = distSq;
+            bestSlot[2] = otherSlot;
+          } else {
+            bestDist[3] = distSq;
+            bestSlot[3] = otherSlot;
           }
-          bestDist[insertAt] = distSq;
-          bestSlot[insertAt] = otherSlot;
         }
       }
     }
   }
 
-  var inputs: array<f32, ${NEURAL_INPUTS}>;
-  for (var i = 0u; i < ${NEURAL_INPUTS}u; i = i + 1u) {
-    inputs[i] = 0.0;
-  }
-  inputs[0] = 1.0;
-  inputs[1] = speedNorm(a.vel);
-  inputs[2] = randf(hash2(a.id ^ 0x51ed270bu, globals.step)) * 2.0 - 1.0;
-
+  let selfSpeed = speedNorm(a.vel);
+  let selfNoise = randf(hash2(a.id ^ 0x51ed270bu, globals.step)) * 2.0 - 1.0;
   let af = vec2f(cos(a.dir), sin(a.dir));
   let ar = vec2f(-af.y, af.x);
+  var hidden: array<f32, ${NEURAL_HIDDEN}>;
+  for (var h = 0u; h < ${NEURAL_HIDDEN}u; h = h + 1u) {
+    let weightBase = h * ${NEURAL_INPUTS}u;
+    hidden[h] =
+      brainAt(slot, weightBase) +
+      selfSpeed * brainAt(slot, weightBase + 1u) +
+      selfNoise * brainAt(slot, weightBase + 2u);
+  }
+
   for (var n = 0u; n < ${NEURAL_NEIGHBORS}u; n = n + 1u) {
     let otherSlot = bestSlot[n];
     if (otherSlot == NO_TARGET) {
@@ -357,21 +387,25 @@ fn planMove(@builtin(global_invocation_id) gid: vec3u) {
     let dirToOther = delta / dist;
     let otherForward = vec2f(cos(other.dir), sin(other.dir));
     let base = 3u + n * 6u;
-    inputs[base] = 1.0;
-    inputs[base + 1u] = clamp(1.0 - dist / params.sensorRadius, 0.0, 1.0);
-    inputs[base + 2u] = dot(af, dirToOther);
-    inputs[base + 3u] = dot(ar, dirToOther);
-    inputs[base + 4u] = dot(af, otherForward);
-    inputs[base + 5u] = speedNorm(other.vel);
+    let f1 = clamp(1.0 - dist / params.sensorRadius, 0.0, 1.0);
+    let f2 = dot(af, dirToOther);
+    let f3 = dot(ar, dirToOther);
+    let f4 = dot(af, otherForward);
+    let f5 = speedNorm(other.vel);
+    for (var h = 0u; h < ${NEURAL_HIDDEN}u; h = h + 1u) {
+      let wb = h * ${NEURAL_INPUTS}u + base;
+      hidden[h] = hidden[h] +
+        brainAt(slot, wb) +
+        f1 * brainAt(slot, wb + 1u) +
+        f2 * brainAt(slot, wb + 2u) +
+        f3 * brainAt(slot, wb + 3u) +
+        f4 * brainAt(slot, wb + 4u) +
+        f5 * brainAt(slot, wb + 5u);
+    }
   }
 
-  var hidden: array<f32, ${NEURAL_HIDDEN}>;
   for (var h = 0u; h < ${NEURAL_HIDDEN}u; h = h + 1u) {
-    var sum = 0.0;
-    for (var i = 0u; i < ${NEURAL_INPUTS}u; i = i + 1u) {
-      sum = sum + inputs[i] * brainAt(slot, h * ${NEURAL_INPUTS}u + i);
-    }
-    hidden[h] = squash(sum);
+    hidden[h] = squash(hidden[h]);
   }
 
   let outBase = ${NEURAL_INPUTS * NEURAL_HIDDEN}u;
@@ -447,7 +481,7 @@ fn chooseContacts(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   if (killSelf == 1u) {
-    atomicStore(&killMarks[slot], 1u);
+    killMarks[slot] = 1u;
   } else {
     mateTargets[slot] = mate;
   }
@@ -460,11 +494,16 @@ fn commitContacts(@builtin(global_invocation_id) gid: vec3u) {
     return;
   }
 
+  var a = agents[slot];
+  if (a.alive != 1u) {
+    return;
+  }
+
   let mate = mateTargets[slot];
   if (mate != NO_TARGET) {
     if (slot < mate) {
-      let slotAliveForBirth = atomicLoad(&killMarks[slot]) == 0u;
-      let mateAliveForBirth = atomicLoad(&killMarks[mate]) == 0u;
+      let slotAliveForBirth = killMarks[slot] == 0u;
+      let mateAliveForBirth = killMarks[mate] == 0u;
       if (slotAliveForBirth && mateAliveForBirth && mateTargets[mate] == slot) {
         let e = atomicAdd(&globals.birthCount, 1u);
         if (e < params.maxAgents) {
@@ -475,11 +514,7 @@ fn commitContacts(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
 
-  var a = agents[slot];
-  if (a.alive != 1u) {
-    return;
-  }
-  if (atomicLoad(&killMarks[slot]) != 0u) {
+  if (killMarks[slot] != 0u) {
     a.alive = 0u;
     agents[slot] = a;
     let f = atomicAdd(&globals.freeCount, 1u);
@@ -540,12 +575,14 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
   let childBase = childSlot * ${BRAIN_WEIGHT_COUNT}u;
   let aBase = event.parentA * ${BRAIN_WEIGHT_COUNT}u;
   let bBase = event.parentB * ${BRAIN_WEIGHT_COUNT}u;
+  var rng = child.id ^ globals.step ^ (t * 0x9e3779b9u);
   for (var i = 0u; i < ${BRAIN_WEIGHT_COUNT}u; i = i + 1u) {
-    let wSeed = hash2(child.id ^ i, globals.step ^ t);
-    let inherited = select(brains[bBase + i], brains[aBase + i], randf(wSeed) < 0.5);
+    rng = pcg(rng + i);
+    let inherited = select(brains[bBase + i], brains[aBase + i], (rng & 1u) == 0u);
     var w = inherited;
-    if (randf(wSeed ^ 0x27d4eb2du) < params.mutationRate) {
-      w = w + (randf(wSeed ^ 0x165667b1u) * 2.0 - 1.0) * params.mutationScale;
+    if (unit16(rng >> 1u) < params.mutationRate) {
+      rng = pcg(rng ^ 0x165667b1u);
+      w = w + (unitFromBits(rng) * 2.0 - 1.0) * params.mutationScale;
     }
     brains[childBase + i] = clamp(w, -params.mutationWeightLimit, params.mutationWeightLimit);
   }

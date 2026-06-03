@@ -4,7 +4,7 @@
 // pass ordering; shader source and CPU-side packing live in focused modules so
 // layout and policy invariants can be tested without constructing WebGPU state.
 
-import { MAX_AGENTS } from "./config";
+import { MAX_AGENTS, POPULATION_FLOOR } from "./config";
 import {
   AGENT_BYTES,
   BIRTH_EVENT_BYTES,
@@ -34,10 +34,14 @@ export class Simulation {
 
   private readonly clearWorkgroups: number;
   private readonly agentWorkgroups: number;
+  private readonly birthWorkgroups: number;
+  private readonly immigrantWorkgroups: number;
 
   constructor(device: GPUDevice) {
     this.clearWorkgroups = Math.ceil(Math.max(NUM_CELLS, MAX_AGENTS) / WORKGROUP_SIZE);
     this.agentWorkgroups = Math.ceil(MAX_AGENTS / WORKGROUP_SIZE);
+    this.birthWorkgroups = Math.ceil((MAX_AGENTS / 2) / WORKGROUP_SIZE);
+    this.immigrantWorkgroups = Math.ceil(POPULATION_FLOOR / WORKGROUP_SIZE);
 
     const storage = GPUBufferUsage.STORAGE;
     this.agents = device.createBuffer({
@@ -155,10 +159,26 @@ export class Simulation {
       this.dispatch(pass, "planMove", this.agentWorkgroups);
       this.dispatch(pass, "chooseContacts", this.agentWorkgroups);
       this.dispatch(pass, "commitContacts", this.agentWorkgroups);
-      this.dispatch(pass, "spawnChildren", this.agentWorkgroups);
-      this.dispatch(pass, "spawnImmigrants", this.agentWorkgroups);
+      this.dispatch(pass, "spawnChildren", this.birthWorkgroups);
+      this.dispatch(pass, "spawnImmigrants", this.immigrantWorkgroups);
     }
     pass.end();
+  }
+
+  encodeProfiledStep(
+    encoder: GPUCommandEncoder,
+    measuredStage: PipelineName,
+    timestampWrites: GPUComputePassTimestampWrites,
+  ): void {
+    this.dispatchProfiled(encoder, "clearStep", this.clearWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "count", this.agentWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "scan", 1, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "scatter", this.agentWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "planMove", this.agentWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "chooseContacts", this.agentWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "commitContacts", this.agentWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "spawnChildren", this.birthWorkgroups, measuredStage, timestampWrites);
+    this.dispatchProfiled(encoder, "spawnImmigrants", this.immigrantWorkgroups, measuredStage, timestampWrites);
   }
 
   private rebuildIndex(pass: GPUComputePassEncoder): void {
@@ -170,5 +190,21 @@ export class Simulation {
   private dispatch(pass: GPUComputePassEncoder, name: PipelineName, workgroups: number): void {
     pass.setPipeline(this.pipelines[name]);
     pass.dispatchWorkgroups(workgroups);
+  }
+
+  private dispatchProfiled(
+    encoder: GPUCommandEncoder,
+    name: PipelineName,
+    workgroups: number,
+    measuredStage: PipelineName,
+    timestampWrites: GPUComputePassTimestampWrites,
+  ): void {
+    const pass = encoder.beginComputePass({
+      label: name,
+      timestampWrites: name === measuredStage ? timestampWrites : undefined,
+    });
+    pass.setBindGroup(0, this.bindGroup);
+    this.dispatch(pass, name, workgroups);
+    pass.end();
   }
 }

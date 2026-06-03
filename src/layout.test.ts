@@ -70,6 +70,6 @@ describe("GPU layout contracts", () => {
   });
 
   it("keeps the grid compatible with the single-workgroup prefix scan", () => {
-    expect(NUM_CELLS % 256).toBe(0);
+    expect(NUM_CELLS % 96).toBe(0);
   });
 });
