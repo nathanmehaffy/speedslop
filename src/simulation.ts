@@ -46,7 +46,7 @@ export class Simulation {
     const storage = GPUBufferUsage.STORAGE;
     this.agents = device.createBuffer({
       size: MAX_AGENTS * AGENT_BYTES,
-      usage: storage,
+      usage: storage | GPUBufferUsage.COPY_SRC,
       mappedAtCreation: true,
       label: "agents",
     });

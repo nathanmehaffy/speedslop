@@ -212,6 +212,7 @@ async function runRenderOnlyCase(
   const simulation = new Simulation(device);
   const renderer = fixedRenderer(device, format, simulation.agentsBuffer, viewport);
   const samples = await collectSamples(options, (querySet) => (encoder) => {
+    renderer.snapshotAgents(encoder);
     const view = context.getCurrentTexture().createView();
     renderer.encode(encoder, view, {
       querySet,
@@ -234,6 +235,7 @@ async function runSimRenderCase(
   const simulation = new Simulation(device);
   const renderer = fixedRenderer(device, format, simulation.agentsBuffer, viewport);
   const samples = await collectSamples(options, (querySet) => (encoder) => {
+    renderer.snapshotAgents(encoder);
     simulation.encode(encoder, steps, {
       querySet,
       beginningOfPassWriteIndex: 0,

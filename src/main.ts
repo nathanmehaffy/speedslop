@@ -7,10 +7,11 @@ async function main(): Promise<void> {
     throw new Error("Canvas element #canvas not found");
   }
   const monitor = document.querySelector<HTMLElement>("#fps-monitor");
+  const controls = document.querySelector<HTMLElement>("#sim-controls");
   const errorPanel = document.querySelector<HTMLElement>("#error-panel");
 
   await startApp(
-    { canvas: canvasElement, monitor },
+    { canvas: canvasElement, monitor, controls },
     {
       onFatalError(error) {
         showFatalError(errorPanel, error);

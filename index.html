@@ -6,6 +6,13 @@
     <title>SpeedSlop</title>
   </head>
   <body>
+    <div id="sim-controls" role="toolbar" aria-label="Simulation speed">
+      <button type="button" data-mode="pause" aria-pressed="false">Pause</button>
+      <button type="button" data-mode="slow" aria-pressed="false">Slow</button>
+      <button type="button" data-mode="fast" aria-pressed="false">Fast</button>
+      <button type="button" data-mode="turbo" aria-pressed="true">Turbo</button>
+      <button type="button" data-mode="max" aria-pressed="false">Max</button>
+    </div>
     <div id="fps-monitor" aria-live="polite">-- FPS</div>
     <div id="error-panel" role="alert" hidden></div>
     <canvas id="canvas" aria-label="Torus agent simulation"></canvas>

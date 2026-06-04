@@ -14,6 +14,11 @@ export function renderTelemetry(sample: TelemetrySample): string {
   ].join("\n");
 }
 
+export function renderStepTelemetry(sample: Pick<TelemetrySample, "elapsedMs" | "steps">): string {
+  const stepsPerSecond = (sample.steps * 1000) / sample.elapsedMs;
+  return `${formatCount(stepsPerSecond)} sim steps/s`;
+}
+
 function formatCount(value: number): string {
   if (value >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(2)}M`;
