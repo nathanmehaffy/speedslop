@@ -2,12 +2,23 @@ import { Camera, type Viewport } from "./camera";
 import { MAX_DEVICE_PIXEL_RATIO, TELEMETRY_SAMPLE_MS } from "./config";
 import { ThroughputController } from "./controller";
 import { initGpu, installGpuErrorHandlers, resizeCanvas } from "./gpu";
+import { InterpretabilityPanel } from "./interpretabilityPanel";
+import { InterpretabilityRecorder } from "./interpretabilityRecorder";
+import {
+  parseAgents,
+  parseGenomeSamples,
+  parseLifeRecords,
+  parseMeta,
+  readSimulationSnapshot,
+} from "./interpretabilitySnapshot";
+import { LiveGraphs } from "./liveGraphs";
 import { GpuProfiler } from "./profiler";
 import { Renderer } from "./renderer";
 import { Simulation } from "./simulation";
 import { renderStepTelemetry, renderTelemetry } from "./telemetry";
 
 type RunMode = "pause" | "slow" | "fast" | "turbo" | "max";
+type ViewMode = "simulation" | "analysis";
 
 const SLOW_STEPS_PER_SECOND = 50;
 const FAST_STEPS_PER_SECOND = 500;
@@ -32,6 +43,8 @@ export interface AppElements {
   canvas: HTMLCanvasElement;
   monitor: HTMLElement | null;
   controls: HTMLElement | null;
+  liveGraphs: HTMLElement | null;
+  analysisRoot: HTMLElement | null;
 }
 
 export interface AppOptions {
@@ -43,7 +56,7 @@ export interface RunningApp {
 }
 
 export async function startApp(elements: AppElements, options: AppOptions): Promise<RunningApp> {
-  const { canvas, monitor, controls } = elements;
+  const { canvas, monitor, controls, liveGraphs: liveGraphsRoot, analysisRoot } = elements;
   const { device, context, format } = await initGpu(canvas);
   const simulation = new Simulation(device);
   const renderer = new Renderer(
@@ -53,7 +66,13 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
   );
   const displayController = new ThroughputController();
   const profiler = new GpuProfiler(device);
+  const recorder = new InterpretabilityRecorder(device, simulation);
+  const liveGraphs = new LiveGraphs(liveGraphsRoot);
   const camera = new Camera();
+  const panelRoot = analysisRoot ?? createAnalysisRoot();
+  const panel = new InterpretabilityPanel(panelRoot, () => {
+    leaveAnalysisMode();
+  });
   let cameraFitted = false;
 
   let animationFrame: number | null = null;
@@ -63,6 +82,8 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
   let started = false;
   let lastTimestamp = 0;
   let mode: RunMode = "turbo";
+  let viewMode: ViewMode = "simulation";
+  let modeBeforeAnalysis: RunMode = mode;
   let fixedStepAccumulator = 0;
   let maxStepsPerBatch = MAX_INITIAL_STEPS;
   let maxEstimatedBatchMs = MAX_TARGET_BATCH_MS;
@@ -74,6 +95,9 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
 
   const detachInput = attachCameraControls(canvas, camera);
   const detachControls = attachRunModeControls(controls, mode, (nextMode) => {
+    if (viewMode === "analysis") {
+      return;
+    }
     if (nextMode === mode) {
       return;
     }
@@ -90,7 +114,17 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     document.body.dataset.simMode = mode;
     reschedule();
   });
+  const detachInterpretabilityControls = attachInterpretabilityControls(
+    controls,
+    (enabled) => {
+      recorder.deepRecording = enabled;
+    },
+    () => {
+      void enterAnalysisMode();
+    },
+  );
   document.body.dataset.simMode = mode;
+  document.body.dataset.viewMode = viewMode;
 
   const stop = (): void => {
     if (stopped) {
@@ -101,6 +135,8 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     removeGpuErrorHandlers();
     detachInput();
     detachControls();
+    detachInterpretabilityControls();
+    recorder.destroy();
   };
 
   const fail = (error: unknown): void => {
@@ -118,6 +154,9 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
 
     try {
       const previousTimestamp = lastTimestamp;
+      if (viewMode === "analysis") {
+        return;
+      }
       const sample = profiler.takeSample();
       if (sample && mode === "turbo") {
         displayController.recordFrameCost(sample.gpuMs, sample.cpuMs, sample.steps);
@@ -164,21 +203,26 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
         const view = context.getCurrentTexture().createView();
         renderer.encode(encoder, view, profiler.renderPassWrites(steps > 0));
       }
+      recorder.encodeSamples(encoder, performance.now(), mode);
       if (shouldRender || steps > 0) {
         profiler.resolve(encoder, steps, performance.now() - workStart);
       }
       device.queue.submit([encoder.finish()]);
       profiler.poll();
+      recorder.poll();
 
       windowFrames += 1;
       windowSteps += steps;
       const elapsed = timestamp - windowStart;
-      if (elapsed >= TELEMETRY_SAMPLE_MS && monitor) {
-        monitor.textContent = renderTelemetry({
-          elapsedMs: elapsed,
-          frames: windowFrames,
-          steps: windowSteps,
-        });
+      if (elapsed >= TELEMETRY_SAMPLE_MS) {
+        if (monitor) {
+          monitor.textContent = renderTelemetry({
+            elapsedMs: elapsed,
+            frames: windowFrames,
+            steps: windowSteps,
+          });
+        }
+        liveGraphs.render(recorder.metaSamples);
         windowStart = timestamp;
         windowFrames = 0;
         windowSteps = 0;
@@ -211,7 +255,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
   }
 
   function scheduleNextFrame(): void {
-    if (stopped || animationFrame !== null || maxLoopActive) {
+    if (stopped || viewMode === "analysis" || animationFrame !== null || maxLoopActive) {
       return;
     }
     if (mode === "max") {
@@ -241,6 +285,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
       while (!stopped && mode === "max" && generation === maxGeneration) {
         while (
           !stopped &&
+          viewMode === "simulation" &&
           mode === "max" &&
           generation === maxGeneration &&
           canSubmitMaxBatch(pending)
@@ -263,11 +308,14 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
         lastCompletionTime = completedAt;
         recordMaxBatchCost(batchMs, batch.steps);
         const elapsed = performance.now() - windowStart;
-        if (elapsed >= TELEMETRY_SAMPLE_MS && monitor) {
-          monitor.textContent = renderStepTelemetry({
-            elapsedMs: elapsed,
-            steps: windowSteps,
-          });
+        if (elapsed >= TELEMETRY_SAMPLE_MS) {
+          if (monitor) {
+            monitor.textContent = renderStepTelemetry({
+              elapsedMs: elapsed,
+              steps: windowSteps,
+            });
+          }
+          liveGraphs.render(recorder.metaSamples);
           resetTelemetryWindow(performance.now());
         }
       }
@@ -275,7 +323,7 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
       fail(error);
     } finally {
       maxLoopActive = false;
-      if (!stopped && mode !== "max") {
+      if (!stopped && viewMode === "simulation" && mode !== "max") {
         scheduleNextFrame();
       }
     }
@@ -288,7 +336,9 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     const encoder = device.createCommandEncoder();
     renderer.snapshotAgents(encoder);
     simulation.encode(encoder, steps);
+    recorder.encodeSamples(encoder, submittedAt, mode);
     device.queue.submit([encoder.finish()]);
+    recorder.poll();
     return {
       steps,
       estimatedMs: maxEstimatedBatchMs,
@@ -325,6 +375,57 @@ export async function startApp(elements: AppElements, options: AppOptions): Prom
     const logTarget = Math.log(target);
     maxStepsPerBatch = Math.exp(logCurrent + MAX_SMOOTHING * (logTarget - logCurrent));
     maxEstimatedBatchMs += MAX_SMOOTHING * (batchMs - maxEstimatedBatchMs);
+  }
+
+  async function enterAnalysisMode(): Promise<void> {
+    if (stopped || viewMode === "analysis") {
+      return;
+    }
+    modeBeforeAnalysis = mode;
+    viewMode = "analysis";
+    mode = "pause";
+    maxGeneration += 1;
+    document.body.dataset.viewMode = viewMode;
+    document.body.dataset.simMode = mode;
+    cancelScheduledFrame();
+    await device.queue.onSubmittedWorkDone();
+    if (stopped) {
+      return;
+    }
+    const capturedAtMs = performance.now();
+    const raw = await readSimulationSnapshot(device, simulation);
+    const agents = parseAgents(raw.agentsBuffer);
+    const lifeRecords = parseLifeRecords(raw.lifeRecordsBuffer);
+    const meta = parseMeta(raw.metaBuffer, capturedAtMs);
+    const genomes = parseGenomeSamples(raw.brainsBuffer, agents);
+    panel.show({
+      capturedAtMs,
+      step: meta.step,
+      agents,
+      lifeRecords,
+      genomes,
+      metaSamples: [...recorder.metaSamples, meta],
+      agentHistory: recorder.agentSamples.map((sample) => sample.agents),
+      camera: {
+        center: { x: camera.center.x, y: camera.center.y },
+        zoom: camera.zoom,
+      },
+    });
+  }
+
+  function leaveAnalysisMode(): void {
+    if (stopped || viewMode !== "analysis") {
+      return;
+    }
+    panel.hide();
+    viewMode = "simulation";
+    mode = modeBeforeAnalysis;
+    started = false;
+    fixedStepAccumulator = 0;
+    document.body.dataset.viewMode = viewMode;
+    document.body.dataset.simMode = mode;
+    resetTelemetryWindow(performance.now());
+    reschedule();
   }
 
   scheduleNextFrame();
@@ -366,6 +467,38 @@ function attachRunModeControls(
       button.removeEventListener("click", onClick);
     }
   };
+}
+
+function attachInterpretabilityControls(
+  controls: HTMLElement | null,
+  onDeepRecordingChange: (enabled: boolean) => void,
+  onAnalyze: () => void,
+): () => void {
+  if (!controls) {
+    return () => {};
+  }
+  const deep = controls.querySelector<HTMLInputElement>("#deep-recording");
+  const analyze = controls.querySelector<HTMLButtonElement>("#analyze-mode");
+  const onDeepChange = (): void => {
+    onDeepRecordingChange(Boolean(deep?.checked));
+  };
+  const onAnalyzeClick = (): void => {
+    onAnalyze();
+  };
+  deep?.addEventListener("change", onDeepChange);
+  analyze?.addEventListener("click", onAnalyzeClick);
+  return () => {
+    deep?.removeEventListener("change", onDeepChange);
+    analyze?.removeEventListener("click", onAnalyzeClick);
+  };
+}
+
+function createAnalysisRoot(): HTMLElement {
+  const root = document.createElement("div");
+  root.id = "analysis-panel";
+  root.hidden = true;
+  document.body.appendChild(root);
+  return root;
 }
 
 function isRunMode(value: string | undefined): value is RunMode {

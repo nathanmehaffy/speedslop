@@ -19,7 +19,7 @@ body {
   left: 12px;
   z-index: 2;
   display: inline-grid;
-  grid-template-columns: repeat(5, minmax(58px, auto));
+  grid-template-columns: repeat(5, minmax(58px, auto)) minmax(72px, auto) minmax(82px, auto);
   overflow: hidden;
   font: 12px/1.2 system-ui, sans-serif;
   background: rgba(5, 8, 16, 0.78);
@@ -28,7 +28,8 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
-#sim-controls button {
+#sim-controls button,
+#sim-controls label {
   min-width: 58px;
   min-height: 30px;
   padding: 6px 10px;
@@ -40,11 +41,20 @@ body {
   cursor: pointer;
 }
 
-#sim-controls button:last-child {
+#sim-controls label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+}
+
+#sim-controls button:last-child,
+#sim-controls label:last-child {
   border-right: 0;
 }
 
-#sim-controls button:hover {
+#sim-controls button:hover,
+#sim-controls label:hover {
   color: #f3f7ff;
   background: rgba(255, 255, 255, 0.08);
 }
@@ -75,6 +85,56 @@ body {
   pointer-events: none;
   user-select: none;
   white-space: pre;
+}
+
+#live-graphs {
+  position: fixed;
+  top: 96px;
+  left: 12px;
+  z-index: 1;
+  display: grid;
+  gap: 8px;
+  width: 190px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.live-graph {
+  display: grid;
+  gap: 4px;
+  padding: 7px 9px 8px;
+  color: #c8d4e8;
+  background: rgba(5, 8, 16, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.live-graph div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font: 11px/1.2 system-ui, sans-serif;
+}
+
+.live-graph span {
+  color: #9caec5;
+}
+
+.live-graph strong {
+  overflow: hidden;
+  max-width: 86px;
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-graph canvas {
+  display: block;
+  width: 168px;
+  height: 42px;
 }
 
 #error-panel {
@@ -115,4 +175,254 @@ body {
 
 body[data-sim-mode="max"] #canvas {
   visibility: hidden;
+}
+
+body[data-sim-mode="max"] #live-graphs {
+  display: none;
+}
+
+body[data-view-mode="analysis"] #canvas,
+body[data-view-mode="analysis"] #fps-monitor,
+body[data-view-mode="analysis"] #live-graphs {
+  visibility: hidden;
+}
+
+#analysis-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  overflow: auto;
+  color: #d9e5f5;
+  background: #050810;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+
+.analysis-shell {
+  min-height: 100%;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+}
+
+.analysis-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: #08101d;
+}
+
+.analysis-header h1,
+.analysis-header p {
+  margin: 0;
+}
+
+.analysis-header h1 {
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.analysis-header p,
+.analysis-note {
+  color: #9caec5;
+}
+
+.analysis-actions,
+.analysis-tabs,
+.probe-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.analysis-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #9caec5;
+}
+
+.analysis-actions button,
+.analysis-actions select,
+.analysis-tabs button,
+.probe-controls button,
+.probe-controls select {
+  min-height: 30px;
+  color: #d9e5f5;
+  background: #101b2c;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.analysis-actions button,
+.analysis-tabs button,
+.probe-controls button {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.analysis-actions select,
+.probe-controls select {
+  padding: 5px 8px;
+}
+
+.analysis-tabs {
+  padding: 10px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: #070d17;
+}
+
+.analysis-tabs button[aria-pressed="true"] {
+  color: #06131f;
+  background: #9ecbff;
+}
+
+.analysis-body {
+  padding: 18px;
+}
+
+.analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.analysis-metric {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: #0d1726;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+}
+
+.analysis-metric span {
+  color: #9caec5;
+  font-size: 12px;
+}
+
+.analysis-metric strong {
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.analysis-chart-row,
+.analysis-split,
+.probe-layout,
+.agent-inspector {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.analysis-chart-row,
+.analysis-split,
+.agent-inspector {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.probe-layout {
+  grid-template-columns: minmax(180px, 260px) minmax(360px, 760px) minmax(240px, 1fr);
+  align-items: start;
+}
+
+.analysis-body canvas {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  background: #050810;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+}
+
+.analysis-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #0d1726;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.analysis-table th,
+.analysis-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.analysis-table th {
+  color: #9caec5;
+  font-weight: 600;
+  background: #101b2c;
+}
+
+.agent-details {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-details h2 {
+  margin: 10px 0 0;
+  font-size: 14px;
+}
+
+.agent-details ol {
+  margin: 0;
+  padding-left: 18px;
+  color: #b9c7dd;
+}
+
+.probe-controls {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+#probe-output {
+  min-height: 220px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  color: #c8d4e8;
+  background: #0d1726;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  #sim-controls {
+    grid-template-columns: repeat(4, minmax(54px, auto));
+  }
+
+  .analysis-header,
+  .analysis-chart-row,
+  .analysis-split,
+  .agent-inspector,
+  .probe-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .analysis-header {
+    display: grid;
+  }
+
+  .analysis-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  #live-graphs {
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: auto;
+  }
+
+  .live-graph canvas {
+    width: 100%;
+  }
 }

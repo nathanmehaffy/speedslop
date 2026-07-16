@@ -12,9 +12,26 @@
       <button type="button" data-mode="fast" aria-pressed="false">Fast</button>
       <button type="button" data-mode="turbo" aria-pressed="true">Turbo</button>
       <button type="button" data-mode="max" aria-pressed="false">Max</button>
+      <label class="deep-recording-toggle"><input id="deep-recording" type="checkbox" /> Deep</label>
+      <button id="analyze-mode" type="button">Analyze</button>
     </div>
     <div id="fps-monitor" aria-live="polite">-- FPS</div>
+    <div id="live-graphs" aria-label="Live simulation graphs">
+      <div class="live-graph">
+        <div><span>Population</span><strong data-live-value="population">--</strong></div>
+        <canvas data-live-graph="population" width="168" height="42"></canvas>
+      </div>
+      <div class="live-graph">
+        <div><span>Birthrate</span><strong data-live-value="birthrate">--/s</strong></div>
+        <canvas data-live-graph="birthrate" width="168" height="42"></canvas>
+      </div>
+      <div class="live-graph">
+        <div><span>Deathrate</span><strong data-live-value="deathrate">--/s</strong></div>
+        <canvas data-live-graph="deathrate" width="168" height="42"></canvas>
+      </div>
+    </div>
     <div id="error-panel" role="alert" hidden></div>
+    <div id="analysis-panel" hidden></div>
     <canvas id="canvas" aria-label="Torus agent simulation"></canvas>
     <script type="module" src="/src/main.ts"></script>
   </body>

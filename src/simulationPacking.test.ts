@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { AGENT_F32, DENSE_BYTES, SIM_PARAMS_BYTES } from "./layout";
+import { AGENT_F32, DENSE_BYTES, LIFE_RECORD_U32, META_BYTES, SIM_PARAMS_BYTES } from "./layout";
 import {
+  LIFE_ORIGIN_INITIAL,
+  META_U32_OFFSET,
   SIM_PARAM_F32,
   SIM_PARAM_U32,
   buildSimulationParams,
   initialAliveCount,
   writeInitialAgents,
   writeInitialDense,
+  writeInitialLifeRecords,
+  writeInitialMeta,
 } from "./simulationPacking";
 import { GRID_DIM, MAX_AGENTS, SENSOR_RADIUS, WORLD_SIZE } from "./config";
 import { NUM_CELLS } from "./simulationPolicy";
@@ -30,6 +34,33 @@ describe("initial simulation packing", () => {
     expect(denseU[2]).toBe(0);
     expect(denseF[lastLive * 4]).toBe(agentF[lastLive * AGENT_F32]);
     expect(denseU[lastLive * 4 + 2]).toBe(lastLive);
+  });
+
+  it("builds initial life records from seeded agent IDs", () => {
+    const agents = new ArrayBuffer(MAX_AGENTS * AGENT_F32 * 4);
+    const records = new ArrayBuffer(MAX_AGENTS * LIFE_RECORD_U32 * 4);
+
+    writeInitialAgents(agents);
+    writeInitialLifeRecords(records, agents);
+
+    const agentU = new Uint32Array(agents);
+    const recordU = new Uint32Array(records);
+    const lastLive = initialAliveCount() - 1;
+    expect(recordU[0]).toBe(agentU[8]);
+    expect(recordU[5]).toBe(LIFE_ORIGIN_INITIAL);
+    expect(recordU[lastLive * LIFE_RECORD_U32]).toBe(agentU[lastLive * AGENT_F32 + 8]);
+    expect(recordU[(lastLive + 1) * LIFE_RECORD_U32]).toBe(0);
+  });
+
+  it("initializes meta with the seeded live count", () => {
+    const meta = new ArrayBuffer(META_BYTES);
+
+    writeInitialMeta(meta);
+
+    const u = new Uint32Array(meta);
+    expect(u[META_U32_OFFSET.step]).toBe(0);
+    expect(u[META_U32_OFFSET.liveCount]).toBe(initialAliveCount());
+    expect(u[META_U32_OFFSET.birthTotal]).toBe(0);
   });
 
 });

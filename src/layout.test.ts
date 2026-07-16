@@ -24,6 +24,10 @@ import {
   AGENT_F32,
   BIRTH_EVENT_BYTES,
   DENSE_BYTES,
+  LIFE_RECORD_BYTES,
+  LIFE_RECORD_U32,
+  META_BYTES,
+  META_U32,
   PLANNED_BYTES,
   PLANNED_F32,
   SIM_PARAMS_BYTES,
@@ -36,6 +40,10 @@ describe("GPU layout contracts", () => {
   it("keeps buffer strides aligned with the WGSL structs", () => {
     expect(AGENT_F32).toBe(10);
     expect(AGENT_BYTES).toBe(40);
+    expect(LIFE_RECORD_U32).toBe(8);
+    expect(LIFE_RECORD_BYTES).toBe(32);
+    expect(META_U32).toBe(16);
+    expect(META_BYTES).toBe(64);
     expect(PLANNED_F32).toBe(4);
     expect(PLANNED_BYTES).toBe(16);
     expect(BIRTH_EVENT_BYTES).toBe(8);

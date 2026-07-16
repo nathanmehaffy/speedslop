@@ -19,10 +19,27 @@ import {
   WORLD_SIZE,
   AGENT_HIT_RADIUS,
 } from "./config";
-import { AGENT_F32, SIM_PARAMS_BYTES } from "./layout";
+import { AGENT_F32, LIFE_RECORD_U32, META_BYTES, SIM_PARAMS_BYTES } from "./layout";
 import { NUM_CELLS } from "./simulationPolicy";
 
 export const BRAIN_BYTES = BRAIN_WEIGHT_COUNT * 4;
+
+export const LIFE_ORIGIN_INITIAL = 0;
+export const LIFE_ORIGIN_CHILD = 1;
+export const LIFE_ORIGIN_IMMIGRANT = 2;
+
+export const META_U32_OFFSET = {
+  step: 0,
+  freeCount: 1,
+  birthCount: 2,
+  childCount: 3,
+  liveCount: 4,
+  birthTotal: 5,
+  deathTotal: 6,
+  immigrantTotal: 7,
+  overwriteBirthTotal: 8,
+  deathAgeTotal: 9,
+} as const;
 
 export const SIM_PARAM_F32 = {
   dt: 0,
@@ -119,6 +136,31 @@ export function writeInitialBrains(range: ArrayBuffer, count: number = MAX_AGENT
       f[base + i] = (rng() * 2 - 1) * 0.5;
     }
   }
+}
+
+export function writeInitialLifeRecords(range: ArrayBuffer, agentsRange: ArrayBuffer, count: number = MAX_AGENTS): void {
+  const records = new Uint32Array(range);
+  const agents = new Uint32Array(agentsRange);
+  const initialAlive = Math.min(initialAliveCount(), count);
+  for (let slot = 0; slot < initialAlive; slot += 1) {
+    const recordBase = slot * LIFE_RECORD_U32;
+    const agentBase = slot * AGENT_F32;
+    const id = agents[agentBase + 8];
+    records[recordBase + 0] = id;
+    records[recordBase + 1] = 0;
+    records[recordBase + 2] = 0;
+    records[recordBase + 3] = 0;
+    records[recordBase + 4] = 0;
+    records[recordBase + 5] = LIFE_ORIGIN_INITIAL;
+  }
+}
+
+export function writeInitialMeta(range: ArrayBuffer): void {
+  const meta = new Uint32Array(range);
+  if (range.byteLength < META_BYTES) {
+    throw new Error(`meta buffer must be at least ${META_BYTES} bytes`);
+  }
+  meta[META_U32_OFFSET.liveCount] = initialAliveCount();
 }
 
 export function writeInitialDense(

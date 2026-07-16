@@ -9,6 +9,8 @@ import {
   AGENT_BYTES,
   BIRTH_EVENT_BYTES,
   DENSE_BYTES,
+  LIFE_RECORD_BYTES,
+  META_BYTES,
   PLANNED_BYTES,
   SIM_PARAMS_BYTES,
 } from "./layout";
@@ -18,6 +20,8 @@ import {
   writeInitialAgents,
   writeInitialBrains,
   writeInitialDense,
+  writeInitialLifeRecords,
+  writeInitialMeta,
 } from "./simulationPacking";
 import { assertSimulationConfig, NUM_CELLS, WORKGROUP_SIZE } from "./simulationPolicy";
 import { PIPELINE_NAMES, SHADER, type PipelineName } from "./simulationShader";
@@ -30,7 +34,10 @@ export class Simulation {
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Record<PipelineName, GPUComputePipeline>;
   private readonly agents: GPUBuffer;
+  private readonly brains: GPUBuffer;
   private readonly dense: GPUBuffer;
+  private readonly lifeRecords: GPUBuffer;
+  private readonly meta: GPUBuffer;
 
   private readonly clearWorkgroups: number;
   private readonly agentWorkgroups: number;
@@ -53,14 +60,23 @@ export class Simulation {
     const agentsRange = this.agents.getMappedRange();
     writeInitialAgents(agentsRange, MAX_AGENTS);
 
-    const brains = device.createBuffer({
+    this.brains = device.createBuffer({
       size: MAX_AGENTS * BRAIN_BYTES,
-      usage: storage,
+      usage: storage | GPUBufferUsage.COPY_SRC,
       mappedAtCreation: true,
       label: "brains",
     });
-    writeInitialBrains(brains.getMappedRange(), MAX_AGENTS);
-    brains.unmap();
+    writeInitialBrains(this.brains.getMappedRange(), MAX_AGENTS);
+    this.brains.unmap();
+
+    this.lifeRecords = device.createBuffer({
+      size: MAX_AGENTS * LIFE_RECORD_BYTES,
+      usage: storage | GPUBufferUsage.COPY_SRC,
+      mappedAtCreation: true,
+      label: "life-records",
+    });
+    writeInitialLifeRecords(this.lifeRecords.getMappedRange(), agentsRange, MAX_AGENTS);
+    this.lifeRecords.unmap();
 
     this.dense = device.createBuffer({
       size: MAX_AGENTS * DENSE_BYTES,
@@ -72,12 +88,14 @@ export class Simulation {
     this.dense.unmap();
     this.agents.unmap();
 
-    // Zero-initialized: step and counters start at 0.
-    const meta = device.createBuffer({
-      size: 32,
-      usage: storage,
+    this.meta = device.createBuffer({
+      size: META_BYTES,
+      usage: storage | GPUBufferUsage.COPY_SRC,
+      mappedAtCreation: true,
       label: "meta",
     });
+    writeInitialMeta(this.meta.getMappedRange());
+    this.meta.unmap();
     const cellCount = device.createBuffer({ size: NUM_CELLS * 4, usage: storage, label: "cell-count" });
     const cellStart = device.createBuffer({ size: (NUM_CELLS + 1) * 4, usage: storage, label: "cell-start" });
     const freeList = device.createBuffer({ size: MAX_AGENTS * 4, usage: storage, label: "free-list" });
@@ -100,7 +118,7 @@ export class Simulation {
     const layout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        ...Array.from({ length: 11 }, (_, i) => i + 1).map((binding) => ({
+        ...Array.from({ length: 12 }, (_, i) => i + 1).map((binding) => ({
           binding,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "storage" as const },
@@ -113,16 +131,17 @@ export class Simulation {
       entries: [
         { binding: 0, resource: { buffer: paramsBuffer } },
         { binding: 1, resource: { buffer: this.agents } },
-        { binding: 2, resource: { buffer: meta } },
+        { binding: 2, resource: { buffer: this.meta } },
         { binding: 3, resource: { buffer: cellCount } },
         { binding: 4, resource: { buffer: cellStart } },
         { binding: 5, resource: { buffer: this.dense } },
         { binding: 6, resource: { buffer: freeList } },
-        { binding: 7, resource: { buffer: brains } },
+        { binding: 7, resource: { buffer: this.brains } },
         { binding: 8, resource: { buffer: planned } },
         { binding: 9, resource: { buffer: killMarks } },
         { binding: 10, resource: { buffer: mateTargets } },
         { binding: 11, resource: { buffer: birthEvents } },
+        { binding: 12, resource: { buffer: this.lifeRecords } },
       ],
     });
 
@@ -138,6 +157,18 @@ export class Simulation {
   /** Latest fixed-slot agent state. */
   get agentsBuffer(): GPUBuffer {
     return this.agents;
+  }
+
+  get brainsBuffer(): GPUBuffer {
+    return this.brains;
+  }
+
+  get lifeRecordsBuffer(): GPUBuffer {
+    return this.lifeRecords;
+  }
+
+  get metaBuffer(): GPUBuffer {
+    return this.meta;
   }
 
   /** Encode `steps` dependent simulation steps into a single compute pass. */

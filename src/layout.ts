@@ -2,6 +2,10 @@
 
 export const AGENT_F32 = 10;
 export const AGENT_BYTES = AGENT_F32 * 4;
+export const LIFE_RECORD_U32 = 8;
+export const LIFE_RECORD_BYTES = LIFE_RECORD_U32 * 4;
+export const META_U32 = 16;
+export const META_BYTES = META_U32 * 4;
 export const PLANNED_F32 = 4;
 export const PLANNED_BYTES = PLANNED_F32 * 4;
 export const BIRTH_EVENT_BYTES = 8;
@@ -41,5 +45,18 @@ export const BIRTH_EVENT_STRUCT_WGSL = /* wgsl */ `
 struct BirthEvent {
   parentA: u32,
   parentB: u32,
+}
+`;
+
+export const LIFE_RECORD_STRUCT_WGSL = /* wgsl */ `
+struct LifeRecord {
+  lineageId: u32,
+  parentAId: u32,
+  parentBId: u32,
+  birthStep: u32,
+  childCount: u32,
+  originKind: u32,
+  pad0: u32,
+  pad1: u32,
 }
 `;

@@ -10,6 +10,7 @@ import {
   AGENT_STRUCT_WGSL,
   BIRTH_EVENT_STRUCT_WGSL,
   DENSE_STRUCT_WGSL,
+  LIFE_RECORD_STRUCT_WGSL,
   PLANNED_STRUCT_WGSL,
 } from "./layout";
 import {
@@ -43,6 +44,8 @@ const WORLD_SIZE: f32 = ${WORLD_SIZE};
 const INV_WORLD_SIZE: f32 = ${1 / WORLD_SIZE};
 const TWO_PI: f32 = 6.28318530717958647;
 const NO_TARGET: u32 = 0xffffffffu;
+const LIFE_ORIGIN_CHILD: u32 = 1u;
+const LIFE_ORIGIN_IMMIGRANT: u32 = 2u;
 
 struct Params {
   dt: f32,
@@ -71,12 +74,19 @@ ${AGENT_STRUCT_WGSL}
 ${DENSE_STRUCT_WGSL}
 ${PLANNED_STRUCT_WGSL}
 ${BIRTH_EVENT_STRUCT_WGSL}
+${LIFE_RECORD_STRUCT_WGSL}
 
 struct Meta {
   step: u32,
   freeCount: atomic<u32>,
   birthCount: atomic<u32>,
   childCount: atomic<u32>,
+  liveCount: atomic<u32>,
+  birthTotal: atomic<u32>,
+  deathTotal: atomic<u32>,
+  immigrantTotal: atomic<u32>,
+  overwriteBirthTotal: atomic<u32>,
+  deathAgeTotal: atomic<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -91,6 +101,7 @@ struct Meta {
 @group(0) @binding(9) var<storage, read_write> killMarks: array<u32>;
 @group(0) @binding(10) var<storage, read_write> mateTargets: array<u32>;
 @group(0) @binding(11) var<storage, read_write> birthEvents: array<BirthEvent>;
+@group(0) @binding(12) var<storage, read_write> lifeRecords: array<LifeRecord>;
 
 fn pcg(v: u32) -> u32 {
   var s = v * 747796405u + 2891336453u;
@@ -225,6 +236,7 @@ fn clearStep(@builtin(global_invocation_id) gid: vec3u) {
     atomicStore(&globals.freeCount, 0u);
     atomicStore(&globals.birthCount, 0u);
     atomicStore(&globals.childCount, 0u);
+    atomicStore(&globals.liveCount, 0u);
   }
 }
 
@@ -267,6 +279,7 @@ fn scan(@builtin(local_invocation_index) lid: u32) {
       acc = acc + blockSum[i];
     }
     cellStart[NUM_CELLS] = acc;
+    atomicStore(&globals.liveCount, acc);
   }
   workgroupBarrier();
 
@@ -517,6 +530,9 @@ fn commitContacts(@builtin(global_invocation_id) gid: vec3u) {
   if (killMarks[slot] != 0u) {
     a.alive = 0u;
     agents[slot] = a;
+    atomicSub(&globals.liveCount, 1u);
+    atomicAdd(&globals.deathTotal, 1u);
+    atomicAdd(&globals.deathAgeTotal, globals.step - lifeRecords[slot].birthStep);
     let f = atomicAdd(&globals.freeCount, 1u);
     freeList[f] = slot;
     return;
@@ -547,8 +563,9 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
   let seed = hash2(t ^ 0x9e3779b9u, globals.step);
   let childOrdinal = atomicAdd(&globals.childCount, 1u);
   let freeCount = atomicLoad(&globals.freeCount);
+  let childFromFreeSlot = childOrdinal < freeCount;
   var childSlot: u32;
-  if (childOrdinal < freeCount) {
+  if (childFromFreeSlot) {
     childSlot = freeList[childOrdinal];
   } else if (randf(seed) < 0.5) {
     childSlot = event.parentA;
@@ -587,7 +604,33 @@ fn spawnChildren(@builtin(global_invocation_id) gid: vec3u) {
     brains[childBase + i] = clamp(w, -params.mutationWeightLimit, params.mutationWeightLimit);
   }
 
+  let lifeA = lifeRecords[event.parentA];
+  let lifeB = lifeRecords[event.parentB];
+  if (childSlot != event.parentA) {
+    lifeRecords[event.parentA].childCount = lifeA.childCount + 1u;
+  }
+  if (childSlot != event.parentB) {
+    lifeRecords[event.parentB].childCount = lifeB.childCount + 1u;
+  }
+
+  var childLife: LifeRecord;
+  childLife.lineageId = min(lifeA.lineageId, lifeB.lineageId);
+  childLife.parentAId = a.id;
+  childLife.parentBId = b.id;
+  childLife.birthStep = globals.step;
+  childLife.childCount = 0u;
+  childLife.originKind = LIFE_ORIGIN_CHILD;
+  childLife.pad0 = 0u;
+  childLife.pad1 = 0u;
+  lifeRecords[childSlot] = childLife;
+
   agents[childSlot] = child;
+  atomicAdd(&globals.birthTotal, 1u);
+  if (childFromFreeSlot) {
+    atomicAdd(&globals.liveCount, 1u);
+  } else {
+    atomicAdd(&globals.overwriteBirthTotal, 1u);
+  }
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -607,7 +650,20 @@ fn spawnImmigrants(@builtin(global_invocation_id) gid: vec3u) {
 
   let slot = freeList[consumedByChildren + t];
   let seed = hash2(slot ^ globals.step, 0xdeadbeefu ^ t);
-  agents[slot] = spawnRandomAgent(slot, seed);
+  let a = spawnRandomAgent(slot, seed);
+  agents[slot] = a;
+  var life: LifeRecord;
+  life.lineageId = a.id;
+  life.parentAId = 0u;
+  life.parentBId = 0u;
+  life.birthStep = globals.step;
+  life.childCount = 0u;
+  life.originKind = LIFE_ORIGIN_IMMIGRANT;
+  life.pad0 = 0u;
+  life.pad1 = 0u;
+  lifeRecords[slot] = life;
   writeRandomBrain(slot, seed);
+  atomicAdd(&globals.liveCount, 1u);
+  atomicAdd(&globals.immigrantTotal, 1u);
 }
 `;

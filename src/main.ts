@@ -8,10 +8,12 @@ async function main(): Promise<void> {
   }
   const monitor = document.querySelector<HTMLElement>("#fps-monitor");
   const controls = document.querySelector<HTMLElement>("#sim-controls");
+  const liveGraphs = document.querySelector<HTMLElement>("#live-graphs");
+  const analysisRoot = document.querySelector<HTMLElement>("#analysis-panel");
   const errorPanel = document.querySelector<HTMLElement>("#error-panel");
 
   await startApp(
-    { canvas: canvasElement, monitor, controls },
+    { canvas: canvasElement, monitor, controls, liveGraphs, analysisRoot },
     {
       onFatalError(error) {
         showFatalError(errorPanel, error);
